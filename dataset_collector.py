@@ -8,43 +8,49 @@ from nidaqmx.constants import TerminalConfiguration, AcquisitionType
 # --- DAQ & Logging Configuration ---
 CHANNEL = "Dev1/ai0"
 SAMPLE_RATE = 1000
-BUFFER_SIZE = 100  # Pulls 0.1 seconds of data per read
-OUTPUT_FILE = "hackathon_training_set.csv"
-CYCLES = 3  # How many times to repeat the entire gesture sequence
+BUFFER_SIZE = 100
+OUTPUT_FILE = "hackathon_balanced_dataset.csv"
 
-# --- Protocol Configuration ---
-# Format: ("Gesture Name", Duration_in_Seconds)
-BASE_PROTOCOL = [
-    ("Fist", 3.0),
-    ("Rest", 3.0),
-    ("Thumbs Up", 3.0),
-    ("Rest", 3.0),
-    ("Open Hand", 3.0),
-    ("Rest", 3.0),
-    ("Pinch", 3.0),
-    ("Rest", 3.0),
-]
+# --- Protocol Generation ---
+CYCLES = 10
+ACTION_DURATION = 3.0
+REST_DURATION = 3.0
 
-# Create the final protocol with an initial long baseline, then repeat the gestures
-PROTOCOL = [("Rest (Baseline)", 5.0)] + (BASE_PROTOCOL * CYCLES)
+# 1. Start with a solid baseline
+PROTOCOL = [("Rest (Baseline)", 5.0)]
+
+# 2. Fist Training Block (10 Reps)
+for _ in range(CYCLES):
+    PROTOCOL.append(("Fist", ACTION_DURATION))
+    PROTOCOL.append(("Rest", REST_DURATION))
+
+# 3. Transition Period (So the user knows to switch gestures)
+PROTOCOL.append(("Get Ready for Open Hand...", 3.0))
+
+# 4. Open Hand Training Block (10 Reps)
+for _ in range(CYCLES):
+    PROTOCOL.append(("Open Hand", ACTION_DURATION))
+    PROTOCOL.append(("Rest", REST_DURATION))
 
 
 class DatasetCollectorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Nadicare Hackathon - EMG Collector")
+        self.root.title("Nadicare Hackathon - Focused EMG Collector")
         self.root.geometry("800x500")
 
-        # State variables
         self.current_gesture = "Waiting..."
         self.is_recording = False
         self.protocol_index = 0
 
-        # UI Elements
         self.instruction_label = tk.Label(
             root, text="Press Start to Begin Protocol", font=("Helvetica", 36, "bold")
         )
         self.instruction_label.pack(expand=True)
+
+        # Added a progress counter so the user knows how many reps are left
+        self.progress_label = tk.Label(root, text="", font=("Helvetica", 16))
+        self.progress_label.pack(pady=10)
 
         self.btn_start = tk.Button(
             root,
@@ -54,17 +60,15 @@ class DatasetCollectorApp:
             bg="#4CAF50",
             fg="white",
         )
-        self.btn_start.pack(pady=40)
+        self.btn_start.pack(pady=30)
 
     def start_session(self):
         self.btn_start.config(state=tk.DISABLED, text="Recording in Progress...")
         self.is_recording = True
 
-        # Start the hardware background thread
         self.daq_thread = threading.Thread(target=self.daq_loop, daemon=True)
         self.daq_thread.start()
 
-        # Kick off the visual prompter
         self.next_phase()
 
     def next_phase(self):
@@ -72,9 +76,16 @@ class DatasetCollectorApp:
             gesture, duration = PROTOCOL[self.protocol_index]
             self.current_gesture = gesture
 
-            # Visual feedback (Blue for Rest, Red for Action)
+            # Update Progress Label
+            self.progress_label.config(
+                text=f"Phase {self.protocol_index + 1} of {len(PROTOCOL)}"
+            )
+
+            # Visual feedback colors
             if "Rest" in gesture:
                 color = "lightblue"
+            elif "Ready" in gesture:
+                color = "yellow"
             else:
                 color = "salmon"
 
@@ -82,8 +93,6 @@ class DatasetCollectorApp:
             self.instruction_label.configure(text=gesture, bg=color)
 
             self.protocol_index += 1
-
-            # Schedule the next phase based on the duration
             self.root.after(int(duration * 1000), self.next_phase)
         else:
             self.finish_session()
@@ -96,6 +105,7 @@ class DatasetCollectorApp:
         self.instruction_label.configure(
             text="Dataset Secured!", bg="white", fg="green"
         )
+        self.progress_label.config(text="")
         self.btn_start.config(text="Finished")
 
     def daq_loop(self):
@@ -127,12 +137,16 @@ class DatasetCollectorApp:
 
                         current_time = time.time()
                         start_time = current_time - (BUFFER_SIZE / SAMPLE_RATE)
-
                         active_label = self.current_gesture
 
-                        for i, val in enumerate(data):
-                            t = start_time + (i * (1.0 / SAMPLE_RATE))
-                            writer.writerow([t, active_label, val])
+                        # Only write to CSV if it's an actual training label
+                        if active_label not in [
+                            "Waiting...",
+                            "Get Ready for Open Hand...",
+                        ]:
+                            for i, val in enumerate(data):
+                                t = start_time + (i * (1.0 / SAMPLE_RATE))
+                                writer.writerow([t, active_label, val])
 
             print(f"File successfully written to {OUTPUT_FILE}")
 
