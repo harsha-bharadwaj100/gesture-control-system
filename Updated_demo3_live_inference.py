@@ -3,9 +3,10 @@ from nidaqmx.constants import TerminalConfiguration, AcquisitionType
 import numpy as np
 import time
 import collections
-import joblib
 import warnings
 from scipy.signal import iirnotch, butter, filtfilt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
@@ -15,12 +16,9 @@ SAMPLE_RATE = 1000
 FILTER_BUFFER_SIZE = 1000
 FEATURE_WINDOW = 300
 READ_CHUNK = 100
+STEP_SIZE = 50  # For training window generation
 
-print("🧠 Loading Ultimate 4-Person Gross Motor Model...")
-# Ensure these names perfectly match the files you downloaded from Colab!
-xgb_model = joblib.load(r"final_fist_open\nadicare_xgboost_purged.pkl")
-classes = np.load(r"final_fist_open\nadicare_classes_xgb.npy")
-print(f"✅ Loaded classes: {classes}")
+print("🧠 Initiating Nadicare Zero-Shot Local BCI Engine...")
 
 
 def apply_filters(data):
@@ -39,7 +37,7 @@ def apply_filters(data):
 
 
 def extract_features(window, env_window):
-    # EXACTLY 13 FEATURES (Polarity-Invariant for reversed-wire immunity!)
+    # 13 Polarity-Invariant Features
     mav = np.mean(np.abs(window))
     rms = np.sqrt(np.mean(window**2))
     var = np.var(window)
@@ -81,7 +79,7 @@ def extract_features(window, env_window):
     ]
 
 
-def run_live_inference():
+def run_instant_bci():
     filter_buffer = np.zeros(FILTER_BUFFER_SIZE)
     prediction_history = collections.deque(maxlen=4)
 
@@ -100,41 +98,68 @@ def run_live_inference():
                 samps_per_chan=SAMPLE_RATE * 2,
             )
 
-            print(f"\n🚀 Hardware locked onto {CHANNEL}.")
+            print(f"\n🚀 Hardware locked onto {CHANNEL}. Starting task...")
             task.start()
 
             print("\n" + "=" * 50)
-            print("🚀 3-GESTURE ONBOARDING SEQUENCE INITIATED")
+            print("🚀 PHASE 1: BIOLOGICAL DATA CAPTURE")
             print("=" * 50)
 
-            calibration_gestures = ["Rest", "Fist", "Open Hand"]
-            all_calibration_data = []
+            gestures = ["Rest", "Fist", "Open Hand"]
+            raw_training_data = {}
 
-            for gesture in calibration_gestures:
+            for gesture in gestures:
                 print(f"\n⚠️ GET READY: {gesture}")
-                time.sleep(5)
+                time.sleep(2.5)
 
-                print(f"🔴 HOLD {gesture.upper()} NOW!")
+                print(f"🔴 HOLD {gesture.upper()} NOW! (Recording 4 seconds...)")
                 gesture_data = []
-                for _ in range(30):
+                # Record 4 seconds to give us plenty of clean data windows
+                for _ in range(40):
                     gesture_data.extend(
                         task.read(number_of_samples_per_channel=READ_CHUNK)
                     )
 
-                all_calibration_data.extend(gesture_data)
-                print(f"✅ {gesture} captured. Relax.")
+                # Apply filters to the raw chunk immediately
+                clean_calib, env_calib = apply_filters(np.array(gesture_data))
+                raw_training_data[gesture] = (clean_calib, env_calib)
+                print(f"✅ Captured.")
 
-            print("\n⚙️ Processing user profile...")
-            clean_calib, env_calib = apply_filters(np.array(all_calibration_data))
+            print("\n⚙️ PHASE 2: INSTANT NEURAL MAPPING...")
+            X_train_list = []
+            y_train_list = []
 
-            raw_mean = np.mean(clean_calib)
-            raw_std = np.std(clean_calib) + 1e-7
-            env_mean = np.mean(env_calib)
-            env_std = np.std(env_calib) + 1e-7
+            # Create the training windows directly in memory
+            for gesture, (clean_sig, env_sig) in raw_training_data.items():
+                # Skip the first 600ms (reaction time purge!)
+                for i in range(600, len(clean_sig) - FEATURE_WINDOW, STEP_SIZE):
+                    window = clean_sig[i : i + FEATURE_WINDOW]
+                    env_window = env_sig[i : i + FEATURE_WINDOW]
+
+                    features = extract_features(window, env_window)
+                    X_train_list.append(features)
+                    y_train_list.append(gesture)
+
+            X_train = np.array(X_train_list)
+            y_train = np.array(y_train_list)
+
+            # Normalize the local data
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+
+            # Train a robust Random Forest instantly
+            print("   -> Training Local Random Forest Classifier...")
+            local_model = RandomForestClassifier(
+                n_estimators=100, max_depth=10, random_state=42, n_jobs=-1
+            )
+            local_model.fit(X_train_scaled, y_train)
 
             print("=" * 50)
-            print(f"✅ Calibration complete! Model is locked to your arm.")
+            print(f"✅ SYSTEM ARMED! Model accuracy locked to your current arm state.")
             print("💪 Start making gestures! (Press Ctrl+C to quit)\n")
+
+            # Flush the buffer before starting live inference
+            task.read(number_of_samples_per_channel=task.in_stream.avail_samp_per_chan)
 
             while True:
                 new_data = task.read(number_of_samples_per_channel=READ_CHUNK)
@@ -146,16 +171,15 @@ def run_live_inference():
                 window_data = clean_signal[-FEATURE_WINDOW:]
                 env_data = envelope_signal[-FEATURE_WINDOW:]
 
-                norm_window = (window_data - raw_mean) / raw_std
-                norm_env = (env_data - env_mean) / env_std
+                features = extract_features(window_data, env_data)
 
-                features = extract_features(norm_window, norm_env)
-                X_live = np.array(features).reshape(1, -1)
+                # Scale using the INSTANT model's scaler
+                X_live = scaler.transform(np.array(features).reshape(1, -1))
 
-                probabilities = xgb_model.predict_proba(X_live)[0]
+                probabilities = local_model.predict_proba(X_live)[0]
                 predicted_index = np.argmax(probabilities)
                 confidence = probabilities[predicted_index]
-                gesture_name = classes[predicted_index]
+                gesture_name = local_model.classes_[predicted_index]
 
                 prediction_history.append(gesture_name)
                 most_common_gesture = max(
@@ -163,7 +187,7 @@ def run_live_inference():
                 )
 
                 if (
-                    confidence > 0.60
+                    confidence > 0.65
                     and prediction_history.count(most_common_gesture) >= 3
                 ):
                     if most_common_gesture == "Fist":
@@ -194,4 +218,4 @@ def run_live_inference():
 
 
 if __name__ == "__main__":
-    run_live_inference()
+    run_instant_bci()

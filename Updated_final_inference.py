@@ -3,9 +3,10 @@ from nidaqmx.constants import TerminalConfiguration, AcquisitionType
 import numpy as np
 import time
 import collections
-import joblib
 import warnings
 from scipy.signal import iirnotch, butter, filtfilt
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
@@ -15,12 +16,13 @@ SAMPLE_RATE = 1000
 FILTER_BUFFER_SIZE = 1000
 FEATURE_WINDOW = 300
 READ_CHUNK = 100
+STEP_SIZE = 50
 
-print("🧠 Loading Ultimate 4-Person Gross Motor Model...")
-# Ensure these names perfectly match the files you downloaded from Colab!
-xgb_model = joblib.load(r"final_fist_open\nadicare_xgboost_purged.pkl")
-classes = np.load(r"final_fist_open\nadicare_classes_xgb.npy")
-print(f"✅ Loaded classes: {classes}")
+# Anti-Flicker EMA Smoothing Factor (0.0 to 1.0)
+# Lower = Smoother but slightly slower reaction time. 0.25 is the sweet spot.
+SMOOTHING_FACTOR = 0.25
+
+print("🧠 Initiating Stable SVM Zero-Shot BCI Engine...")
 
 
 def apply_filters(data):
@@ -39,7 +41,6 @@ def apply_filters(data):
 
 
 def extract_features(window, env_window):
-    # EXACTLY 13 FEATURES (Polarity-Invariant for reversed-wire immunity!)
     mav = np.mean(np.abs(window))
     rms = np.sqrt(np.mean(window**2))
     var = np.var(window)
@@ -81,9 +82,9 @@ def extract_features(window, env_window):
     ]
 
 
-def run_live_inference():
+def run_stable_bci():
     filter_buffer = np.zeros(FILTER_BUFFER_SIZE)
-    prediction_history = collections.deque(maxlen=4)
+    # We drop the heavy deque buffer because EMA handles the smoothing now!
 
     try:
         with nidaqmx.Task() as task:
@@ -100,41 +101,66 @@ def run_live_inference():
                 samps_per_chan=SAMPLE_RATE * 2,
             )
 
-            print(f"\n🚀 Hardware locked onto {CHANNEL}.")
+            print(f"\n🚀 Hardware locked onto {CHANNEL}. Starting task...")
             task.start()
 
             print("\n" + "=" * 50)
-            print("🚀 3-GESTURE ONBOARDING SEQUENCE INITIATED")
+            print("🚀 PHASE 1: STABLE BIOLOGICAL CALIBRATION")
             print("=" * 50)
 
-            calibration_gestures = ["Rest", "Fist", "Open Hand"]
-            all_calibration_data = []
+            # CHANGE THESE TO "Thumbs Up", "Index Finger" for the other demo!
+            gestures = ["Rest", "Fist", "Open Hand"]
+            raw_training_data = {}
 
-            for gesture in calibration_gestures:
+            for gesture in gestures:
                 print(f"\n⚠️ GET READY: {gesture}")
-                time.sleep(5)
+                time.sleep(2.0)
 
-                print(f"🔴 HOLD {gesture.upper()} NOW!")
+                print(f"🔴 HOLD {gesture.upper()} NOW! (Hold perfectly steady...)")
                 gesture_data = []
-                for _ in range(30):
+                for _ in range(40):  # 4 seconds
                     gesture_data.extend(
                         task.read(number_of_samples_per_channel=READ_CHUNK)
                     )
 
-                all_calibration_data.extend(gesture_data)
-                print(f"✅ {gesture} captured. Relax.")
+                clean_calib, env_calib = apply_filters(np.array(gesture_data))
+                raw_training_data[gesture] = (clean_calib, env_calib)
+                print(f"✅ Captured.")
 
-            print("\n⚙️ Processing user profile...")
-            clean_calib, env_calib = apply_filters(np.array(all_calibration_data))
+            print("\n⚙️ PHASE 2: SVM BOUNDARY MAPPING...")
+            X_train_list = []
+            y_train_list = []
 
-            raw_mean = np.mean(clean_calib)
-            raw_std = np.std(clean_calib) + 1e-7
-            env_mean = np.mean(env_calib)
-            env_std = np.std(env_calib) + 1e-7
+            for gesture, (clean_sig, env_sig) in raw_training_data.items():
+                for i in range(600, len(clean_sig) - FEATURE_WINDOW, STEP_SIZE):
+                    window = clean_sig[i : i + FEATURE_WINDOW]
+                    env_window = env_sig[i : i + FEATURE_WINDOW]
+
+                    features = extract_features(window, env_window)
+                    X_train_list.append(features)
+                    y_train_list.append(gesture)
+
+            X_train = np.array(X_train_list)
+            y_train = np.array(y_train_list)
+
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+
+            print("   -> Training Support Vector Machine (RBF Kernel)...")
+            # SVM is vastly superior for tiny datasets. C=10 forces strict margins.
+            local_model = SVC(
+                kernel="rbf", C=10.0, gamma="scale", probability=True, random_state=42
+            )
+            local_model.fit(X_train_scaled, y_train)
+
+            # Initialize our EMA probability array
+            smoothed_probs = np.zeros(len(local_model.classes_))
 
             print("=" * 50)
-            print(f"✅ Calibration complete! Model is locked to your arm.")
+            print(f"✅ SYSTEM ARMED! Rock-solid SVM locked to your arm.")
             print("💪 Start making gestures! (Press Ctrl+C to quit)\n")
+
+            task.read(number_of_samples_per_channel=task.in_stream.avail_samp_per_chan)
 
             while True:
                 new_data = task.read(number_of_samples_per_channel=READ_CHUNK)
@@ -146,26 +172,23 @@ def run_live_inference():
                 window_data = clean_signal[-FEATURE_WINDOW:]
                 env_data = envelope_signal[-FEATURE_WINDOW:]
 
-                norm_window = (window_data - raw_mean) / raw_std
-                norm_env = (env_data - env_mean) / env_std
+                features = extract_features(window_data, env_data)
 
-                features = extract_features(norm_window, norm_env)
-                X_live = np.array(features).reshape(1, -1)
+                X_live = scaler.transform(np.array(features).reshape(1, -1))
 
-                probabilities = xgb_model.predict_proba(X_live)[0]
-                predicted_index = np.argmax(probabilities)
-                confidence = probabilities[predicted_index]
-                gesture_name = classes[predicted_index]
+                raw_probabilities = local_model.predict_proba(X_live)[0]
 
-                prediction_history.append(gesture_name)
-                most_common_gesture = max(
-                    set(prediction_history), key=prediction_history.count
+                # --- THE MAGIC: EMA PROBABILITY SMOOTHING ---
+                smoothed_probs = (SMOOTHING_FACTOR * raw_probabilities) + (
+                    (1 - SMOOTHING_FACTOR) * smoothed_probs
                 )
 
-                if (
-                    confidence > 0.60
-                    and prediction_history.count(most_common_gesture) >= 3
-                ):
+                predicted_index = np.argmax(smoothed_probs)
+                confidence = smoothed_probs[predicted_index]
+                most_common_gesture = local_model.classes_[predicted_index]
+
+                # UI Output (Notice how clean the logic is now)
+                if confidence > 0.60:
                     if most_common_gesture == "Fist":
                         print(
                             f"✊ [ {most_common_gesture:<12} ]  (Conf: {confidence*100:.0f}%)    ",
@@ -183,7 +206,7 @@ def run_live_inference():
                         )
                 else:
                     print(
-                        f"⏳ [ {'Processing':<12} ]                                  ",
+                        f"⏳ [ {'Transitioning':<12} ]                                  ",
                         end="\r",
                     )
 
@@ -194,4 +217,4 @@ def run_live_inference():
 
 
 if __name__ == "__main__":
-    run_live_inference()
+    run_stable_bci()
