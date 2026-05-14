@@ -8,3 +8,10 @@ __pycache__/
 *.py[oc]
 *.egg-info
 
+paper*
+*.pdf
+*.zip
+*.png
+*.tex
+context
+conference-latex-template
