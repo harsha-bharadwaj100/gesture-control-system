@@ -4,35 +4,65 @@ import time
 import csv
 import nidaqmx
 from nidaqmx.constants import TerminalConfiguration, AcquisitionType
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ProtocolStep:
+    label: str
+    duration_seconds: float
+    repetition_index: int | None = None
+    is_recordable: bool = True
+
+
+def build_study_protocol(
+    gestures=("Thumbs Up", "Index Finger"),
+    repetitions_per_gesture: int = 50,
+    action_duration_seconds: float = 3.0,
+    rest_duration_seconds: float = 3.0,
+    baseline_duration_seconds: float = 5.0,
+    transition_duration_seconds: float = 3.0,
+):
+    protocol = [
+        ProtocolStep("Rest (Baseline)", baseline_duration_seconds, is_recordable=False)
+    ]
+
+    for gesture_index, gesture_name in enumerate(gestures):
+        for repetition_index in range(1, repetitions_per_gesture + 1):
+            protocol.append(
+                ProtocolStep(
+                    gesture_name,
+                    action_duration_seconds,
+                    repetition_index=repetition_index,
+                )
+            )
+            protocol.append(
+                ProtocolStep(
+                    "Rest",
+                    rest_duration_seconds,
+                    repetition_index=repetition_index,
+                    is_recordable=False,
+                )
+            )
+
+        if gesture_index < len(gestures) - 1:
+            protocol.append(
+                ProtocolStep(
+                    f"Get Ready for {gestures[gesture_index + 1]}...",
+                    transition_duration_seconds,
+                    is_recordable=False,
+                )
+            )
+
+    return protocol
 
 # --- DAQ & Logging Configuration ---
 CHANNEL = "Dev1/ai0"
 SAMPLE_RATE = 1000
 BUFFER_SIZE = 100
-
-# ⚠️ CHANGE THIS NAME FOR EACH PERSON (e.g., "harsha_fingers.csv", "harshitha_fingers.csv")
-OUTPUT_FILE = "fingers_dataset.csv"
-
-# --- Protocol Generation ---
-CYCLES = 10
-ACTION_DURATION = 3.0
-REST_DURATION = 3.0
-
-# 1. Start with a solid baseline
-PROTOCOL = [("Rest (Baseline)", 5.0)]
-
-# 2. Thumbs Up Block
-for _ in range(CYCLES):
-    PROTOCOL.append(("Thumbs Up", ACTION_DURATION))
-    PROTOCOL.append(("Rest", REST_DURATION))
-
-# 3. Transition Period (Crucial for resetting mental focus)
-PROTOCOL.append(("Get Ready for Index Finger...", 3.0))
-
-# 4. Index Finger Block
-for _ in range(CYCLES):
-    PROTOCOL.append(("Index Finger", ACTION_DURATION))
-    PROTOCOL.append(("Rest", REST_DURATION))
+REPETITIONS_PER_GESTURE = 50
+GESTURES = ("Thumbs Up", "Index Finger")
+PROTOCOL = build_study_protocol(gestures=GESTURES, repetitions_per_gesture=REPETITIONS_PER_GESTURE)
 
 
 class DatasetCollectorApp:
@@ -41,9 +71,16 @@ class DatasetCollectorApp:
         self.root.title("Nadicare Hackathon - Finger Gesture Collector")
         self.root.geometry("800x500")
 
+        self.participant_var = tk.StringVar(value="participant_01")
         self.current_gesture = "Waiting..."
         self.is_recording = False
         self.protocol_index = 0
+        self.current_step = None
+
+        self.participant_entry = tk.Entry(
+            root, textvariable=self.participant_var, font=("Helvetica", 18)
+        )
+        self.participant_entry.pack(pady=20)
 
         self.instruction_label = tk.Label(
             root, text="Press Start to Begin", font=("Helvetica", 36, "bold")
@@ -64,6 +101,8 @@ class DatasetCollectorApp:
         self.btn_start.pack(pady=30)
 
     def start_session(self):
+        self.participant_id = self.participant_var.get().strip() or "participant_01"
+        self.output_file = f"{self.participant_id}_finger_dataset.csv"
         self.btn_start.config(state=tk.DISABLED, text="Recording in Progress...")
         self.is_recording = True
 
@@ -74,23 +113,24 @@ class DatasetCollectorApp:
 
     def next_phase(self):
         if self.protocol_index < len(PROTOCOL):
-            gesture, duration = PROTOCOL[self.protocol_index]
-            self.current_gesture = gesture
+            self.current_step = PROTOCOL[self.protocol_index]
+            self.current_gesture = self.current_step.label
+            duration = self.current_step.duration_seconds
 
             self.progress_label.config(
                 text=f"Phase {self.protocol_index + 1} of {len(PROTOCOL)}"
             )
 
             # Visual feedback colors
-            if "Rest" in gesture:
+            if "Rest" in self.current_gesture:
                 color = "lightblue"
-            elif "Ready" in gesture:
+            elif "Ready" in self.current_gesture:
                 color = "yellow"
             else:
                 color = "salmon"
 
             self.root.configure(bg=color)
-            self.instruction_label.configure(text=gesture, bg=color)
+            self.instruction_label.configure(text=self.current_gesture, bg=color)
 
             self.protocol_index += 1
             self.root.after(int(duration * 1000), self.next_phase)
@@ -100,6 +140,7 @@ class DatasetCollectorApp:
     def finish_session(self):
         self.is_recording = False
         self.current_gesture = "Done"
+        self.current_step = None
 
         self.root.configure(bg="white")
         self.instruction_label.configure(
@@ -126,9 +167,11 @@ class DatasetCollectorApp:
 
                 print(f"Hardware locked onto {CHANNEL}. Awaiting data stream...")
 
-                with open(OUTPUT_FILE, mode="w", newline="") as file:
+                with open(self.output_file, mode="w", newline="") as file:
                     writer = csv.writer(file)
-                    writer.writerow(["Timestamp", "Gesture_Label", "Voltage"])
+                    writer.writerow(
+                        ["Participant_ID", "Timestamp", "Gesture_Label", "Repetition", "Voltage"]
+                    )
 
                     task.start()
 
@@ -139,16 +182,20 @@ class DatasetCollectorApp:
                         start_time = current_time - (BUFFER_SIZE / SAMPLE_RATE)
                         active_label = self.current_gesture
 
-                        # Prevents transition text from getting saved to the CSV
-                        if active_label not in [
-                            "Waiting...",
-                            "Get Ready for Index Finger...",
-                        ]:
+                        if self.current_step and self.current_step.is_recordable:
                             for i, val in enumerate(data):
                                 t = start_time + (i * (1.0 / SAMPLE_RATE))
-                                writer.writerow([t, active_label, val])
+                                writer.writerow(
+                                    [
+                                        self.participant_id,
+                                        t,
+                                        active_label,
+                                        self.current_step.repetition_index,
+                                        val,
+                                    ]
+                                )
 
-            print(f"File successfully written to {OUTPUT_FILE}")
+            print(f"File successfully written to {self.output_file}")
 
         except Exception as e:
             print(f"\nCRITICAL DAQ ERROR:\n{e}")

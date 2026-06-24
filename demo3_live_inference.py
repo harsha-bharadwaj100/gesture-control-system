@@ -64,6 +64,11 @@ def extract_features(window, env_window):
     mean_freq = np.sum(freqs * fft_vals) / total_power if total_power > 0 else 0
     peak_freq = freqs[np.argmax(fft_vals)] if total_power > 0 else 0
 
+    # Returns 13 polarity-invariant features:
+    # Time-domain: MAV, RMS, VAR, Waveform Length (WL), Zero Crossings (ZC), Slope Sign Changes (SSC)
+    # Envelope: Mean and Max of the signal envelope
+    # Hjorth Parameters: Activity, Mobility, Complexity
+    # Frequency-domain: Mean Frequency and Peak Frequency
     return [
         mav,
         rms,
