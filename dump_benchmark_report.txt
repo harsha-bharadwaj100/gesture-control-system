@@ -1,0 +1,74 @@
+Master Model Benchmarking Analysis Report
+Project: Single-Channel Surface EMG Gesture Recognition Using Generalized Triple Ensemble & Deep Autoencoders
+Dataset Pool: 15 Participants (`All_Datasets/*.csv`) | Features: 16 Extracted Features + Per-Participant Standardization ($z^{(p)}$)
+Table 1: Master Model Benchmarking Summary (Global Architecture Comparison)
+Table 2: Deep Learning Sensitivity Grid & Convergence Analysis
+Key Research Insights:
+Tree Ensembles vs. Deep Learning: The Proposed Triple Voting Ensemble and Random Forest outperform basic Deep Learning models on single-channel sEMG due to high non-linear partition capability on Hjorth complexity and Spectral Entropy features.
+Representation Learning: The 1D-CNN Autoencoder compresses 1500-sample raw windows into latent bottleneck embeddings, effectively filtering high-frequency noise and mains hum.
+
+--- Table 1 ---
+Model | Configuration | Accuracy (%) | Training Time (s) | Inference Latency (ms) | Generalization Stability (σ)
+**SVM** | Standardized (16 Features) | 41.94% | 46.27s | 0.62ms | 0.0795
+**KNN** | Standardized (16 Features) | 41.83% | 0.00s | 0.08ms | 0.0665
+**Random Forest** | Standardized (16 Features) | 59.72% | 40.84s | 0.15ms | 0.1166
+**Proposed Triple Ensemble** | Standardized (16 Features) | 58.89% | 105.17s | 0.43ms | 0.1477
+**1D-CNN + LSTM** | Best Config (sgd, lr=0.01) | 44.72% | 164.36s | 0.26ms | 6.4280
+**1D-CNN + Autoencoder** | Best Config (rmsprop, latent_dim=32) | 27.39% | 42.73s | 0.39ms | 4.8609
+
+--- Table 2 ---
+Architecture | Optimizer | Learning Rate | Batch Size / Latent Dim | Convergence Epoch (E_best/Max) | Val Accuracy (%) | Training Time (s) | Latency (ms)
+1D-CNN + LSTM | adam | 0.01 | Batch=32 | 17/100 | 19.94% | 48.26s | 0.26ms
+1D-CNN + LSTM | adam | 0.01 | Batch=64 | 41/100 | 32.28% | 57.91s | 0.40ms
+1D-CNN + LSTM | adam | 0.01 | Batch=128 | 32/100 | 40.00% | 27.84s | 0.25ms
+1D-CNN + LSTM | adam | 0.001 | Batch=32 | 29/100 | 42.39% | 77.36s | 0.26ms
+1D-CNN + LSTM | adam | 0.001 | Batch=64 | 39/100 | 44.28% | 53.65s | 0.26ms
+1D-CNN + LSTM | adam | 0.001 | Batch=128 | 43/100 | 43.33% | 34.24s | 0.25ms
+1D-CNN + LSTM | adam | 0.0001 | Batch=32 | 100/100 | 39.44% | 256.97s | 0.25ms
+1D-CNN + LSTM | adam | 0.0001 | Batch=64 | 100/100 | 39.39% | 132.43s | 0.25ms
+1D-CNN + LSTM | adam | 0.0001 | Batch=128 | 100/100 | 35.28% | 73.13s | 0.25ms
+1D-CNN + LSTM | rmsprop | 0.01 | Batch=32 | 37/100 | 39.33% | 85.93s | 0.25ms
+1D-CNN + LSTM | rmsprop | 0.01 | Batch=64 | 31/100 | 37.28% | 37.39s | 0.25ms
+1D-CNN + LSTM | rmsprop | 0.01 | Batch=128 | 30/100 | 38.17% | 21.41s | 0.24ms
+1D-CNN + LSTM | rmsprop | 0.001 | Batch=32 | 40/100 | 41.94% | 91.67s | 0.24ms
+1D-CNN + LSTM | rmsprop | 0.001 | Batch=64 | 44/100 | 40.56% | 52.47s | 0.25ms
+1D-CNN + LSTM | rmsprop | 0.001 | Batch=128 | 69/100 | 43.83% | 45.13s | 0.25ms
+1D-CNN + LSTM | rmsprop | 0.0001 | Batch=32 | 100/100 | 38.33% | 224.91s | 0.27ms
+1D-CNN + LSTM | rmsprop | 0.0001 | Batch=64 | 86/100 | 34.00% | 109.00s | 0.25ms
+1D-CNN + LSTM | rmsprop | 0.0001 | Batch=128 | 100/100 | 32.50% | 68.20s | 0.26ms
+1D-CNN + LSTM | sgd | 0.01 | Batch=32 | 75/100 | 44.72% | 164.36s | 0.26ms
+1D-CNN + LSTM | sgd | 0.01 | Batch=64 | 91/100 | 43.33% | 103.11s | 0.25ms
+1D-CNN + LSTM | sgd | 0.01 | Batch=128 | 100/100 | 38.06% | 62.30s | 0.25ms
+1D-CNN + LSTM | sgd | 0.001 | Batch=32 | 100/100 | 31.06% | 212.57s | 0.25ms
+1D-CNN + LSTM | sgd | 0.001 | Batch=64 | 100/100 | 27.61% | 115.08s | 0.25ms
+1D-CNN + LSTM | sgd | 0.001 | Batch=128 | 100/100 | 24.56% | 63.68s | 0.26ms
+1D-CNN + LSTM | sgd | 0.0001 | Batch=32 | 100/100 | 24.17% | 218.33s | 0.25ms
+1D-CNN + LSTM | sgd | 0.0001 | Batch=64 | 100/100 | 23.06% | 110.33s | 0.25ms
+1D-CNN + LSTM | sgd | 0.0001 | Batch=128 | 100/100 | 21.78% | 61.82s | 0.36ms
+1D-CNN + Autoencoder | adam | 0.01 | LatentDim=16 | 18/100 | 20.00% | 48.57s | 0.41ms
+1D-CNN + Autoencoder | adam | 0.01 | LatentDim=32 | 24/100 | 20.00% | 66.22s | 0.43ms
+1D-CNN + Autoencoder | adam | 0.01 | LatentDim=64 | 44/100 | 20.00% | 112.34s | 0.75ms
+1D-CNN + Autoencoder | adam | 0.001 | LatentDim=16 | 14/100 | 24.22% | 41.99s | 0.38ms
+1D-CNN + Autoencoder | adam | 0.001 | LatentDim=32 | 13/100 | 23.72% | 37.01s | 0.41ms
+1D-CNN + Autoencoder | adam | 0.001 | LatentDim=64 | 14/100 | 24.50% | 39.47s | 0.41ms
+1D-CNN + Autoencoder | adam | 0.0001 | LatentDim=16 | 20/100 | 21.44% | 52.61s | 0.41ms
+1D-CNN + Autoencoder | adam | 0.0001 | LatentDim=32 | 17/100 | 24.78% | 49.27s | 0.40ms
+1D-CNN + Autoencoder | adam | 0.0001 | LatentDim=64 | 17/100 | 22.28% | 46.94s | 0.39ms
+1D-CNN + Autoencoder | rmsprop | 0.01 | LatentDim=16 | 15/100 | 23.56% | 40.58s | 0.75ms
+1D-CNN + Autoencoder | rmsprop | 0.01 | LatentDim=32 | 16/100 | 27.39% | 42.73s | 0.39ms
+1D-CNN + Autoencoder | rmsprop | 0.01 | LatentDim=64 | 13/100 | 23.89% | 35.11s | 0.51ms
+1D-CNN + Autoencoder | rmsprop | 0.001 | LatentDim=16 | 16/100 | 25.33% | 44.76s | 0.41ms
+1D-CNN + Autoencoder | rmsprop | 0.001 | LatentDim=32 | 13/100 | 25.28% | 35.36s | 0.75ms
+1D-CNN + Autoencoder | rmsprop | 0.001 | LatentDim=64 | 11/100 | 22.11% | 30.66s | 0.38ms
+1D-CNN + Autoencoder | rmsprop | 0.0001 | LatentDim=16 | 20/100 | 22.61% | 51.60s | 0.38ms
+1D-CNN + Autoencoder | rmsprop | 0.0001 | LatentDim=32 | 13/100 | 22.83% | 35.87s | 0.42ms
+1D-CNN + Autoencoder | rmsprop | 0.0001 | LatentDim=64 | 13/100 | 22.11% | 36.09s | 0.40ms
+1D-CNN + Autoencoder | sgd | 0.01 | LatentDim=16 | 13/100 | 22.44% | 34.90s | 0.53ms
+1D-CNN + Autoencoder | sgd | 0.01 | LatentDim=32 | 11/100 | 22.22% | 32.78s | 0.39ms
+1D-CNN + Autoencoder | sgd | 0.01 | LatentDim=64 | 12/100 | 22.56% | 32.57s | 0.38ms
+1D-CNN + Autoencoder | sgd | 0.001 | LatentDim=16 | 18/100 | 23.44% | 47.08s | 0.39ms
+1D-CNN + Autoencoder | sgd | 0.001 | LatentDim=32 | 15/100 | 22.94% | 40.55s | 0.38ms
+1D-CNN + Autoencoder | sgd | 0.001 | LatentDim=64 | 13/100 | 22.67% | 35.76s | 0.39ms
+1D-CNN + Autoencoder | sgd | 0.0001 | LatentDim=16 | 91/100 | 22.78% | 218.28s | 0.40ms
+1D-CNN + Autoencoder | sgd | 0.0001 | LatentDim=32 | 61/100 | 21.28% | 147.56s | 0.41ms
+1D-CNN + Autoencoder | sgd | 0.0001 | LatentDim=64 | 45/100 | 22.39% | 110.35s | 0.41ms

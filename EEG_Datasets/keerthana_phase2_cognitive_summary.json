@@ -1,0 +1,14 @@
+{
+    "Participant_ID": "keerthana",
+    "Phase": "phase2_cognitive",
+    "Scalp_Position": "F3-F4 (Frontal Motor/Cognitive Strip)",
+    "Total_Samples": 69829,
+    "Rest_Baseline_Samples": 34929,
+    "Post_Session_Baseline": {
+        "Baseline_Mean_Volts": 0.00047715515138286804,
+        "Baseline_Noise_Std_Volts": 0.055472156610921385,
+        "Baseline_RMS_Volts": 0.05547420874699413
+    },
+    "Average_Dry_Impedance_kOhm": 225.07779791170503,
+    "Timestamp": "2026-08-18 13:13:14"
+}

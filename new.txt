@@ -1,0 +1,97 @@
+#import "@preview/basic-resume:0.2.9": *
+
+#let name = "Harsha Bharadwaj" 
+#let location = "Bengaluru, Karnataka" 
+#let email = "harshabharadwaj01092004@gmail.com" 
+#let github = "linkedin.com/in/harsha-bharadwaj-233a94293" 
+#let linkedin = "github.com/harsha-bharadwaj100" 
+#let phone = "(+91) 7204041681" 
+
+#show: resume.with(
+  author: name,
+  email: email,
+  github: github,
+  linkedin: linkedin,
+  phone: phone,
+  accent-color: "#111827",
+  font: "New Computer Modern",
+  paper: "a4",
+  author-position: center ,
+  personal-info-position: center,
+)
+
+== Education
+
+#edu(
+  institution: "B.N.M Institute of Technology (BNMIT)", 
+  location: "Bengaluru, Karnataka", 
+  dates: dates-helper(start-date: "2023", end-date: "Present"), 
+  degree: "Bachelor of Engineering in Computer Science and Engineering", 
+)
+- *CGPA*: 9.49
+
+== Work Experience
+
+#work(
+  title: "Software Engineering Trainee", 
+  location: "Bengaluru, Karnataka", 
+  company: "BETSOL", 
+  dates: dates-helper(start-date: "Aug 2025", end-date: "Dec 2025"), 
+)
+- Engineered database designs and production-ready implementations utilizing MySQL in more than 5 key areas. 
+- Developed a high-performance back-end using FastAPI to handle complex server-side logic. 
+- Orchestrated project deployment by containerizing applications using Docker for consistent environments. 
+
+== Projects
+
+#project(
+  name: "Real-Time EMG Brain-Computer Interface", 
+  url: "github.com/harsha-bharadwaj100/gesture-control-system", 
+)
+- Engineered a real-time gesture recognition system overcoming single-channel hardware limits via anatomical sensor mapping and a custom DSP pipeline.
+- Created a dynamic "Zero-Shot" ML engine using an Exponential Moving Average stabilized SVM for instant user calibration and zero-flicker inference.
+- Built an asynchronous, multi-threaded Matplotlib dashboard rendering live bio-signals and 3D virtual hand tracking.
+- *Technologies*: Python, NIDAQmx, XGBoost, Scikit-Learn (SVM), SciPy, Matplotlib.
+
+#project(
+  name: "Astro-Strike Simulator", 
+  url: "github.com/harsha-bharadwaj100/astrostrike-simulator", 
+)
+- Implemented an interactive planetary defense tool featuring a custom *real-time* physics engine for vector-based asteroid deflection. 
+- Integrated NASA NEO API data with an automated land-vs-ocean detection algorithm to calculate and visualize dynamic Tsunami and Seismic impact risks. 
+- *Technologies*: React, React Three Fiber, Leaflet, Flask, Docker. 
+
+#project(
+  name: "Procedural 3D Mesh Optimization Tool", 
+  url: "github.com/harsha-bharadwaj100/Fossee-Project", 
+)
+- designed a custom Blender add-on for automated geometry generation and vertex-merging. 
+- Integrated a standalone pip-installable Python package for YAML data serialization. 
+- *Technologies*: Python, Blender API (bpy & bmesh), PyYAML, Data Structures. 
+
+== Achievements & Leadership
+
+#extracurriculars(
+  activity: "Global Nominee, NASA International Space Apps Challenge", 
+  dates: "Oct 2025", 
+)
+- Ranked in the top 11% of 11,510 projects worldwide for a real-time planetary defense simulator. 
+#extracurriculars(
+  activity: "2nd Prize (Hardware Track), NadiCare HealthTech Hackathon", 
+  dates: "Mar 2026", 
+)
+- Constructed a single-channel EMG BCI using a custom DSP pipeline and XGBoost, achieving >85% accuracy.
+#extracurriculars(
+  activity: "Execom (Industry Relations), IEEE Student Branch BNMIT", 
+  dates: "Feb 2026 --- Present", 
+)
+- Volunteered in organizing events, improving student collaboration and guiding more than 60 members. 
+
+== Skills
+- *Programming Languages*: Python, Java, C, JavaScript, HTML, CSS, MySQL. 
+- *Libraries & Frameworks*: React, Next.js, Node.js, FastAPI, Flask, NumPy, SciPy, Scikit-Learn, XGBoost, Matplotlib, Tailwind CSS. 
+- *Cloud, DevOps & Tools*: Docker, AWS, Firebase, Jenkins, Linux, Web Sockets, Git, Blender.
+- *Core Domains*: AI/ML (Deep Learning, CNNs, SVM), Digital Signal Processing (DSP), Computer Vision, NLP Basics.
+
+== Certifications
+- *NPTEL*: Intro to IoT | *Udemy*: Data Science, NLP & ML Boot-camp | *Great Learning*: Flask Python

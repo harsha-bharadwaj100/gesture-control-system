@@ -1,0 +1,140 @@
+EMG Gesture Recognition: Research Paper Draft (Sections 1-9)
+Project Information
+Project Title: Single-Channel Surface EMG Gesture Recognition Using Generalized Triple Ensemble Modeling Objective: To develop a robust, generalized machine learning pipeline capable of classifying five distinct hand gestures across multiple participants using a single-channel surface EMG, overcoming inter-participant baseline variance and significant mains hum noise.
+Participant Information
+Data was collected from a diverse group of 15 participants to ensure the generalized model was not overfit to a specific physiological profile.
+Demographic Breakdown: - Total Participants: 15 - Gender Distribution: 9 Female, 6 Male
+- Age Distribution: - 13 participants in the 20–21 years age range. - 2 participants in older demographics (one 30–40 years, one 40–50 years).
+(Note: Medical history and dominant hand data were not explicitly tracked for this dataset. All participant identities have been anonymized for the purpose of this study).
+Data Collection Protocol
+The data collection phase was strictly controlled to ensure standardization across the 15 datasets.
+Hardware Setup: - Device: National Instruments Data Acquisition (NI-DAQ) system (Dev1/ai0). - Sensor: Single-channel surface EMG (sEMG) electrode. - Sampling Frequency: 1,000 Hz.
+Recording Protocol: - Target Gestures (5): Fist, Open Palm, Pinch, Wrist Up, Wrist Down. - Cycle Timing: Each repetition consisted of a 4-second active muscle contraction followed by a 4-second complete rest period. - Repetitions: Participants were instructed to perform 30 to 50 repetitions per gesture. - Total Dataset Volume: A total of 3,994 valid active gesture sequences were successfully captured across the 15 participants, resulting in roughly 20 minutes of recording time per subject.
+Preprocessing and Signal Conditioning Pipeline
+To process raw single-channel sEMG signals across diverse participants, an advanced signal conditioning pipeline was engineered. This pipeline addresses two main challenges: high-amplitude 50 Hz power line noise (and its high-frequency harmonics) and user contraction latency.
+Architectural Design: Cumulative Sequential vs. Independent Processing
+A critical design decision in this pipeline is the use of cumulative sequential (layer-by-layer) processing rather than independent parallel filters.
+To demonstrate the necessity of this sequential architecture, we compare the cumulative filtering steps (Figure 1) against the outcome of applying each filter independently directly to the raw, noisy input (Figure 2).
+Figure 1: Cumulative Preprocessing Pipeline (Proposed Sequential Method)
+sEMG Preprocessing Pipeline Stages
+Figure 2: Independent Preprocessing Application (Failed Parallel Method)
+sEMG Preprocessing Applied Independently Mathematical & Analytical Comparison:
+Harmonic Notch Filter (Stage 1):
+Cumulative: Eliminates the 50 Hz mains hum and its higher-order harmonics, revealing the underlying low-amplitude muscle burst shapes.
+Independent: While it removes the electrical hum, the baseline drift and low-frequency motion artifacts remain, preventing clean window segmenting.
+Bandpass Filter (Stage 2):
+Cumulative (Applied to Notched): Eliminates high-frequency sensor noise and low-frequency motion artifacts, standardizing the signal to the active 20 Hz - 450 Hz sEMG band.
+Independent (Applied to Raw): Fails completely because the massive 50 Hz mains hum falls directly inside the passband, leaving the periodic hum untouched.
+Teager-Kaiser Energy Operator (TKEO) (Stage 3):
+Cumulative (Applied to Bandpassed): Accentuates the instant amplitude and frequency spikes of active muscle action potentials: [ = x^2(t) - x(t-1) x(t+1) ] while suppressing remaining background white noise.
+Independent (Applied to Raw): The TKEO amplifies high-frequency energy. Applying it to raw data magnifies the high-amplitude 50 Hz mains hum and high-frequency noise spikes, completely drowning out the actual muscle contraction signal.
+Moving Average Envelope (Stage 4):
+Cumulative (Applied to TKEO): A 200ms moving average envelope over the absolute TKEO signal yields a clean, smooth activation profile. A 1.5-second sliding window dynamically harvests the maximum energy contraction window.
+Independent (Applied to Raw): Fails because the envelope simply tracks the continuous, high-amplitude 50 Hz noise offset, resulting in a flat envelope from which no active gesture bursts can be extracted.
+Feature Engineering and Selection
+From each dynamically segmented 1.5-second (1500 samples) muscle contraction and rest window, a high-dimensional feature vector containing 16 mathematical features was extracted to represent the sEMG signal characteristics across time, statistical, complexity, and frequency domains.
+The 16 sEMG Feature Set:
+TKEO	moving-average envelope.
+Envelope Max	Peak	value	of	the	TKEO moving-average envelope.
+Feature Correlation Heatmap Analysis
+To evaluate redundant information and multicollinearity across the 16 features, a Pearson correlation matrix was computed over the global dataset.
+Figure 3: sEMG Feature Correlation Heatmap (Pearson r)
+sEMG Feature Correlation Heatmap
+As shown in Figure 3, the amplitude features (MAV, RMS, Variance, Envelope Mean, Envelope Max, Hjorth Activity) are highly correlated with one another (r≥0.95), indicating redundant representation of signal power. However, frequency and complexity metrics (Zero Crossings, Slope Sign Changes, Hjorth Mobility, Hjorth Complexity, Peak Frequency, Spectral Entropy) show low-to-moderate correlation with amplitude features (r≤0.35), supplying independent, orthogonal dimensions that aid the classifiers in defining distinct boundaries.
+Feature Importance Analysis
+To assess the relative predictive power of each feature, a Random Forest Classifier (500 estimators) was trained across the pooled, standardized dataset. Feature importance was estimated using Mean Decrease in Impurity (Gini Importance).
+Figure 4: Relative sEMG Feature Importance Comparison
+sEMG Feature Importance Comparison Discussion of Top Features:
+Waveform Length (WL) & Hjorth Activity: These time-domain metrics emerged as the most critical features. Waveform Length maps both the frequency and amplitude complexity of the muscle contractions, while Hjorth Activity captures the absolute power variance.
+Envelope Mean & MAV/RMS: The envelope statistics and raw time-domain amplitudes display high importance, highlighting the clear energy threshold differences between active gestures and the resting baseline.
+Frequency Domain (FFT) & Complexity: Features like Spectral Entropy and Hjorth Complexity exhibit lower individual Gini importance but are essential for distinguishing between highly similar gestures (such as Pinch vs. Fist) which display overlapping amplitude scales but distinct spectral distributions.
+Generalization Strategy
+The major bottleneck in building a unified classification model across multiple participants is the physiological baseline variance. Because of differing skin impedance, subcutaneous fat thickness, and electrode placement geometry, a raw sEMG voltage value of 0.5V during a “Fist” gesture for one participant could equal a “Pinch” gesture or even a “Rest” baseline for another.
+To overcome this without utilizing complex, slow deep-learning domain adaptation, we implemented a Per-Participant Feature Standardization technique. Before pooling the feature matrices for model training, each individual participant’s feature matrix X(p) was standardized
+independently: [ z^{(p)}_{i,j} = ] where μ(p) and σ(p) represent the mean and standard deviation
+j	j
+of feature j calculated strictly across participant p’s recording session.
+Impact: This maps all participants’ unique physical voltage scales to a common standard distribution (μ=0,σ=1). The machine learning model is thus forced to learn relative geometric changes in signal patterns rather than absolute physiological voltage scales.
+Machine Learning Models
+We benchmarked 4 classical and deep learning architectures against a proposed ensemble classifier to determine the optimal generalized mapping for single-channel sEMG signals:
+Support Vector Machine (SVM): Implemented with a Radial Basis Function (RBF) kernel, optimized for separating high-dimensional feature bounds.
+K-Nearest Neighbors (KNN): A distance-based instance classifier (k=5), acting as a baseline for local feature proximity.
+1D-CNN + LSTM Deep Learning Network: Composed of two Conv1D layers (64 and 128 filters, kernel sizes 10 and 5) for temporal sequence extraction, coupled with a 64-unit LSTM block to process the raw voltage sequences directly.
+Random Forest (RF): A bagging ensemble of 500 decision trees to evaluate ensemble partition boundaries.
+Proposed Triple Ensemble Voting Classifier: A soft-voting ensemble combining XGBoost (n_estimators=500, max_depth=15), Random Forest (n_estimators=500), and HistGradientBoosting (max_iter=500) to leverage gradient boosted trees and bagging trees simultaneously.
+Offline Evaluation Metrics
+The models were trained on 85% of the pooled dataset and evaluated on a 15% stratified holdout set.
+Global Performance Comparison
+The impact of our proposed preprocessing and per-participant standardization is illustrated by comparing models trained on raw, unstandardized baselines against the proposed pipeline.
+Figure 5: Baseline vs. Proposed Pipeline Global Accuracy
+Accuracy Comparison
+As shown in Figure 5, the proposed preprocessing and scaling pipeline dramatically improved accuracy across all model types: - SVM: Rose from 28.98% to 67.50% (+38.52%). - KNN:
+Rose from 47.02% to 68.50% (+21.48%). - Random Forest: Rose from 48.65% to 71.67% (+23.02%
+). - 1D-CNN: Rose from 32.90% to 57.93% (+25.03%).
+Table 1: Model Benchmarking Summary
+Pipeline
+Note: Generalization Stability (σ) represents the standard deviation of accuracy across all 15 users. A lower σ indicates the model generalizes more uniformly.
+Computational Latency vs. Accuracy Trade-Off
+Figure 6 shows the Pareto optimal frontier mapping prediction latency (ms) against validation accuracy.
+Figure 6: Accuracy vs. Inference Latency Pareto Frontier
+Accuracy vs Latency
+The Real-Time Threshold: For live gesture control, prediction delays must remain under 100ms.
+SVM & KNN: SVM is extremely fast (0.18ms) but loses 4.17% accuracy compared to the tree ensembles.
+1D-CNN + LSTM: Deep learning fails to establish Pareto efficiency, showing the highest prediction latency (75.92ms) while achieving the lowest accuracy (57.93%). This indicates that single-channel sEMG sequences do not contain enough spatial-temporal structures for CNNs to learn without overfitting.
+Ensemble vs. Random Forest: The proposed Voting Ensemble (84.75ms) sits right on the edge of the 100ms latency ceiling. While its accuracy is tied with Random Forest (71.67%), the ensemble shows reduced classification variance on complex gestures.
+Class-wise Performance & Error Analysis
+Figure 7 displays the class-wise F1-scores of each standardized model across all gestures.
+Figure 7: Grouped Class-wise F1-Score Comparison
+F1-Score Comparison
+Figure 8: Confusion Matrix Side-by-Side Grid
+Confusion Matrix Grid Error Analysis:
+Rest State Detection: All models excel at isolating the “Rest” state (F1-score ≥0.92), as the TKEO and Notch filters successfully pull the signal down to near-zero.
+Wrist Up/Down Confusion: Figure 8 reveals that SVM, KNN, and CNN frequently confuse Wrist Up with Wrist Down. Under a single-channel configuration, these opposite wrist extension movements produce very similar MAV/RMS envelopes. The proposed ensemble reduces this error by leveraging XGBoost’s non-linear partitions on Spectral Entropy and SSC to distinguish the two.
+Live Hardware Inference Deployment
+To validate the practical utility of the proposed system, the trained model was deployed as a real-time gesture control interface (live_advanced_inference.py) hooked to the physical NI-DAQ hardware.
+Dynamic Live Calibration Protocol
+Because the generalized model relies on Per-Participant Standardization, the live inference script must establish the user’s specific muscle baseline. To do this, a guided 6-stage live calibration loop was developed: 1. Baseline Rest (5s): The user relaxes their arm. The script records the baseline mean and noise. 2. Gesture Cycling (2s per gesture): The system prompts the user to perform and hold each of the five gestures sequentially (Fist, Open Palm, Pinch, Wrist Up, Wrist Down).
+The calibration data is filtered and passed to the feature extraction block. The resulting feature mean (μ) and standard deviation (σ) are saved as the user’s personal scaling profile.
+Real-Time Processing Loop
+Once calibrated, the system streams data at 1000 Hz: - Windowing: A 1.5-second rolling buffer is filled. - Processing: Every 200ms (5 times a second), the buffer is notch filtered, bandpass filtered, and its 16 features are extracted. - Normalization: The features are standardized using the user’s calibration profile: (x−μ)/σ. - Voting: The standardized vector is fed to the pre-loaded ensemble model. - Smoothing Queue: A 5-sample history queue outputs the mode prediction to prevent visual jitter, resulting in a live prediction latency of less than 200ms.
+
+--- Table 1 ---
+Feature Domain | Feature Name | Description / Formula | 
+Time Domain (Amplitude) | MAV | Mean	Absolute | Value
+representing signal amplitude. | representing signal amplitude. | representing signal amplitude. | representing signal amplitude.
+RMS | RMS | Root	Mean | Square
+ |  | representing	the | physical
+ |  | signal power. | 
+ | Variance | Variance of the sEMG voltage | Variance of the sEMG voltage
+ |  | sequence. | sequence.
+Time Domain (Temporal) | Waveform Length (WL) | Cumulative	length	of	the sEMG waveform: ∑| xi − xi−1 | | Cumulative	length	of	the sEMG waveform: ∑| xi − xi−1 |
+ |  | . | .
+ | Zero Crossings (ZC) | Counts the times the signal | Counts the times the signal
+crosses	the	zero-voltage threshold. | crosses	the	zero-voltage threshold. | crosses	the	zero-voltage threshold. | crosses	the	zero-voltage threshold.
+ | Slope Sign Changes (SSC) | Counts the times the slope of | Counts the times the slope of
+ |  | the signal changes direction. | the signal changes direction.
+Envelope Statistics | Envelope Mean | Mean value of the calculated | Mean value of the calculated
+
+--- Table 2 ---
+Feature Domain | Feature Name | Description / Formula | Description / Formula
+Statistical Shape | Skewness | Measures the asymmetry of the amplitude distribution. | Measures the asymmetry of the amplitude distribution.
+ | Kurtosis | Measures the “tailedness” of the amplitude distribution. | Measures the “tailedness” of the amplitude distribution.
+Complexity (Hjorth) | Hjorth Activity | Represents the signal power (variance of signal). | Represents the signal power (variance of signal).
+ | Hjorth Mobility | Represents	the	mean frequency of the signal. | Represents	the	mean frequency of the signal.
+ | Hjorth Complexity | Represents	the	changes	in signal frequency bandwidth. | Represents	the	changes	in signal frequency bandwidth.
+Frequency Domain (FFT) | Mean Frequency | Weighted average frequency calculated from the FFT power spectrum. | Weighted average frequency calculated from the FFT power spectrum.
+Peak Frequency | Peak Frequency | Frequency maximum density. | displaying	the power	spectral
+Spectral Entropy | Spectral Entropy | Measures complexity | the	spectral and	chaotic
+behavior of the signal. | behavior of the signal. | behavior of the signal. | behavior of the signal.
+
+--- Table 3 ---
+Model | Configurati on | Accuracy (%) | Training (s) | Time | Inference Latency (ms) | Generalization Stability (σ)
+SVM | Proposed (Standardiz ed) | 67.50% | 1.12s |  | 0.18ms | 0.106
+KNN | Proposed (Standardiz ed) | 68.50% | <0.01s |  | 18.84ms | 0.098
+1D-CNN + LSTM | Baseline (No Scaling) | 56.89% | 75.51s |  | 75.89ms | 0.165
+1D-CNN + LSTM | Proposed (Standardiz ed) | 57.93% | 46.53s |  | 75.92ms | 0.142
+Random Forest | Proposed (Standardiz | 71.67% | 4.45s |  | 25.01ms | 0.108
+
+--- Table 4 ---
+Model | Pipeline Configurati on ed) | Accuracy (%) | Training Time (s) | Inference Latency (ms) | Generalization Stability (σ)
+Proposed Ensemble | Proposed (Standardiz ed) | 71.67% | 22.29s | 84.75ms | 0.109

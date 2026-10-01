@@ -1,0 +1,14 @@
+{
+    "Participant_ID": "chinmaya",
+    "Phase": "phase2_cognitive",
+    "Scalp_Position": "F3-F4 (Frontal Motor/Cognitive Strip)",
+    "Total_Samples": 150223,
+    "Rest_Baseline_Samples": 75123,
+    "Post_Session_Baseline": {
+        "Baseline_Mean_Volts": 0.0013475304797776878,
+        "Baseline_Noise_Std_Volts": 0.31005534424270115,
+        "Baseline_RMS_Volts": 0.31005827247769707
+    },
+    "Average_Dry_Impedance_kOhm": 245.59003287746378,
+    "Timestamp": "2026-08-18 14:42:01"
+}

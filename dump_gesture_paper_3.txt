@@ -1,0 +1,336 @@
+
+=== Page 1 ===
+Intent-Driven Single-Channel sEMG Classification:
+A Real-Time BCI Architecture Using Zero-Shot
+Calibration and Temporal Smoothing
+1st Arpita Kulkarni
+Dept. of Electronics & Comm. Engg.
+B.N.M. Institute of Technology
+Bengaluru, India
+email@domain.com
+2nd Priyanka S
+Dept. of Computer Science & Engg.
+B.N.M. Institute of Technology
+Bengaluru, India
+email@domain.com
+3rd Harsha Bharadwaj
+Dept. of Computer Science & Engg.
+B.N.M. Institute of Technology
+Bengaluru, India
+email@domain.com
+4th Guru Raj Patil
+Dept. of Computer Science & Engg.
+B.N.M. Institute of Technology
+Bengaluru, India
+email@domain.com
+5th Keerthana
+Dept. of Computer Science & Engg.
+B.N.M. Institute of Technology
+Bengaluru, India
+email@domain.com
+Abstract—Current real-time surface electromyography
+(sEMG) gesture recognition systems heavily rely on high-density
+sensor arrays or computationally expensive deep learning
+models, limiting their viability for affordable, edge-device
+deployment. Single-channel, AC-coupled amplifiers offer a
+low-cost alternative but suffer from severe spatial ambiguity and
+signal cancellation during complex motor tasks. In this paper, we
+propose a novel, intent-driven Brain-Computer Interface (BCI)
+architecture that overcomes single-channel hardware constraints
+through an “anatomical hack”—utilizing horizontal flexor
+placement to capture polarity-sensitive fine motor actuations. To
+ensure real-world robustness across varying skin impedances,
+we introduce a Zero-Shot Guided Onboarding sequence for
+dynamic data standardization, alongside a 600ms Reaction
+Time Purge to eliminate human latency from training sets.
+The system achieves a raw cross-subject statistical accuracy
+of 75.46%, which is elevated to high functional stability via
+a rolling temporal majority-vote algorithm. Crucially, the
+entire digital signal processing and XGBoost inference pipeline
+operates with a latency of 9.46 ms per frame, demonstrating a
+highly efficient, deployable framework for real-time prosthetic
+and virtual interface control.
+Index Terms—Brain-Computer Interface, sEMG, XGBoost,
+Real-time Processing, Digital Signal Processing, Zero-Shot Cali-
+bration
+I. INTRODUCTION
+The translation of raw human biosignals into reliable digital
+commands remains a primary challenge in the development
+of Brain-Computer Interfaces (BCIs) and accessible pros-
+thetics. While laboratory-grade solutions frequently utilize
+High-Density surface Electromyography (HD-sEMG) arrays
+paired with Convolutional Neural Networks (CNNs) to achieve
+high classification accuracy, these systems are fundamentally
+constrained by high inference latency, prohibitive costs, and
+computational overhead unsuitable for low-power edge micro-
+controllers.
+Conversely, utilizing low-cost, single-channel AC-coupled
+amplifiers presents a severe physical limitation: the inability to
+spatially isolate distinct muscle bellies. This results in differen-
+tial signal cancellation, making fine motor classification highly
+ambiguous. Traditional machine learning models trained in
+static laboratory conditions frequently degrade in real-world
+deployments due to user-to-user variance in muscle density,
+skin impedance, and hardware placement.
+To bridge the gap between low-cost hardware and
+enterprise-grade deployment, this research proposes a highly
+optimized, dual-model sEMG classification architecture. The
+primary objectives of this study are:
+1) To demonstrate an “anatomical hack” leveraging hor-
+izontal flexor sensor placement to achieve fine-motor
+resolution on a single AC-coupled channel.
+2) To implement a Zero-Shot Guided Onboarding calibra-
+tion sequence that mathematically standardizes dynamic
+user environments in under 10 seconds.
+3) To drastically reduce computational latency (<10 ms per
+frame) while maintaining functional UI stability through
+temporal smoothing algorithms.
+4) To mathematically quantify the detrimental impact of
+human reaction-time latency on sEMG training datasets
+via a systematic ablation study.
+II. RELATEDWORK
+Current research trajectories in sEMG-based gesture recog-
+nition generally bifurcate into two domains: high-density ar-
+rays (HD-sEMG) leveraging deep learning for maximum accu-
+racy, and single-channel configurations optimized for power-
+efficient edge deployment.
+=== Page 2 ===
+A. HD-sEMG and Deep Learning Latency
+Recent academic work has increasingly shifted toward deep
+learning frameworks to handle the spatial complexity of HD-
+sEMG data. The CT-HGR framework utilizes a Vision Trans-
+former (ViT) network with attention mechanisms to achieve
+89.13% accuracy on instantaneous frames [2]. Similarly,
+lightweight architectures like All-ConvNet attempt to simplify
+feature extraction [3]. However, processing high-dimensional
+data at high sampling rates often results in latency exceeding
+the 10ms threshold desired for fluid user interface interactions.
+The emergence of foundation models, such as the generalized
+neuromotor interface by Kaifosh et al. (2025), offers out-of-
+the-box generalization but relies on immense computational
+infrastructure [1]. In contrast, our work maximizes the in-
+formation density of a single channel, achieving functional
+stability on significantly lower-power edge hardware.
+B. Single-Channel Constraints and Spatial Ambiguity
+Single-channel sEMG systems are preferred for wearable
+BCIs due to their minimal footprint and cost. The primary
+limitation of these systems is “crosstalk”—the superposition
+of signals from multiple muscle groups leading to spatial
+ambiguity [4]. Research by Wu et al. explored sEMG envelope
+signals for single-channel gesture recognition but achieved
+suboptimal recognition rates for multi-finger gestures due
+to this spatial filter bottleneck [4]. Our “Anatomical Hack”
+directly addresses this by forcing electrical polarities to bypass
+traditional bipolar cancellation.
+C. Real-Time Calibration and Temporal Stability
+A persistent hurdle in deploying sEMG-BCIs is the non-
+stationarity of the signal caused by fluctuating skin impedance
+and sweat [6]. While hybrid frameworks modulate classifier
+weights dynamically [5], they still require burdensome labeled
+data collection for onboarding. By implementing zero-shot sta-
+tistical standardization, our architecture ensures stable steady-
+state classification without heavy retraining burdens [7].
+III. HARDWARECONSTRAINTS ANDPHYSIOLOGICAL
+ADAPTATIONS
+A. Limitations of Single-Channel AC-Coupled Amplification
+To prioritize affordability, this architecture utilizes a single-
+channel, AC-coupled differential amplifier (Anthriq/Nexstem
+specification). While highly efficient, AC-coupled hardware
+introduces a severe physical constraint: the system strips all
+direct current (DC) voltage offsets, forcibly centering the
+waveform at 0.00V .
+Consequently, the differential reading suffers from spatial
+ambiguity. During complex multi-finger gestures, the co-
+contraction of adjacent muscle groups leads to destructive
+signal interference. A traditional machine learning model
+relying purely on signal amplitude cannot reliably differentiate
+between the actuation of an index finger and a thumb when
+both generate overlapping microvolt bursts on a single axis.
+B. The “Anatomical Hack” for Spatial Resolution
+To overcome this hardware limitation, we implemented a
+physiological adaptation for electrode placement. Rather than
+utilizing standard longitudinal placement along the muscle
+belly, the electrodes were oriented horizontally across the
+flexor digitorum superficialis and the flexor pollicis longus.
+By placing the positive terminal on the radial aspect (ori-
+ented toward the thumb) and the negative terminal on the ulnar
+aspect (oriented toward the index and middle fingers), the
+system physically forces isolated finger actuations to produce
+opposing electrical polarities. Flexing the thumb draws the
+differential voltage into a positive skew, while flexing the
+index finger draws it into a negative skew. This strategy
+allows the classification algorithms to rely on polarity-sensitive
+mathematical features.
+IV. REAL-TIMESIGNALPROCESSINGARCHITECTURE
+To extract deterministic intent from chaotic biological volt-
+ages, the raw analog signal is routed through a rigid, dual-
+buffer Digital Signal Processing (DSP) pipeline.
+Fig. 1. Digital Signal Processing Pipeline. (Top) Raw AC-Coupled sEMG.
+(Middle) 20-450Hz Bandpass Filtered. (Bottom) 5Hz Linear Envelope.
+A. Digital DRL and Artifact Suppression
+To combat 50Hz electromagnetic interference, we imple-
+mented a digital Driven Right Leg (DRL) equivalent via an
+Infinite Impulse Response (IIR) notch filter (ω 0 = 50Hz,
+Q= 30):
+H(z) = 1−2 cos(ω0)z−1 +z −2
+1−2rcos(ω 0)z−1 +r 2z−2 (1)
+Following noise attenuation, the signal passes through a 4th-
+order Butterworth bandpass filter (20Hz and 450Hz) to isolate
+motor unit action potentials from movement artifacts.
+B. The EMG Linear Envelope
+Because the amplifier centers the raw signal at 0.00V , the
+algorithm must trace the macroscopic contour of the muscle
+=== Page 3 ===
+contraction. The signal undergoes full-wave rectification fol-
+lowed by a 5Hz lowpass filter, quantified locally by the Root
+Mean Square (RMS):
+RMS=
+vuut 1
+N
+NX
+i=1
+x2
+i (2)
+To prevent digital edge-ringing, the pipeline maintains a con-
+tinuous 1-second rolling background buffer, safely slicing only
+the most recent 300ms window for feature extraction.
+V. DYNAMICFEATUREENGINEERING
+A. The Reaction-Time Purge
+When a user is visually prompted to perform a gesture,
+there is a physiological latency before steady-state motor unit
+recruitment occurs [8]. Our pipeline enforces a strict 600ms
+“Reaction-Time Purge.” By programmatically slicing the first
+600ms from every recorded gesture block, the XGBoost model
+trains exclusively on the deterministic, peak-contraction phase.
+TABLE I
+FEATURESPACEDEFINITIONS ANDRELEVANCE
+Feature Metric Physical Interpretation / Relevance
+RMS / MA VGeneral measure of muscle effort/volume.
+Waveform LengthCaptures signal complexity and frequency
+amplitude.
+Zero CrossingsSpectral proxy; shifts indicate muscle fa-
+tigue.
+Env. Max/MeanExtracts peak force from the 5Hz linear
+envelope.
+SkewnessIdentifies asymmetrical firing (Anatomical
+Hack).
+KurtosisDetects sharp, impulsive MUAP bursts
+(Anatomical Hack).
+B. Feature Space Separation
+As outlined in Table I, the feature extraction pipelines
+were bifurcated. TheGross Motor Modelutilized 13 strictly
+polarity-invariant features (e.g., MA V , Variance, Waveform
+Length) to ensure immunity to accidental electrode shifting.
+TheFine Motor Modelreintroduced 3 polarity-sensitive
+features (Raw Mean, Skewness, and Kurtosis) to exploit the
+horizontal flexor placement.
+VI. ALGORITHMICCLASSIFICATION ANDTEMPORAL
+SMOOTHING
+A. Zero-Shot Guided Onboarding
+To prevent model degradation across sessions due to fluctu-
+ations in skin hydration, we implemented a Zero-Shot Guided
+Onboarding sequence. The system dynamically calculates the
+unique Mean (µ) and Standard Deviation (σ) of the user’s
+current microvolt range during a 3-second baseline phase.
+Fig. 2. XGBoost Feature Importance revealing the dominance of polarity-
+sensitive features (Kurtosis and Skewness) in fine-motor classification.
+B. Temporal Smoothing Logic
+Raw statistical classification is insufficient for BCI control
+due to natural signal stochasticity. We implemented a tem-
+poral majority-vote algorithm acting as a software debounce,
+requiring consistent multi-frame confidence before triggering
+UI outputs.
+Algorithm 1Live Inference & Temporal Smoothing
+1:Input:Continuous sEMG streamS, Trained ModelM
+2:Onboarding:Calibrateµ calib, σcalib from 3s baseline
+3:Initialize:Buf f erf ilter←[1000],Queue preds ←[5]
+4:whileLive Inference Activedo
+5:Append new 100 samples toBuf f er f ilter
+6:S clean, Senv ←ApplyFilters(Buf f erf ilter)
+7:Slice 300ms windowW←S clean[−300 :]
+8:W norm ←(W−µ calib)/σcalib
+9:F eatures←Extract(W norm, Senv[−300 :])
+10:P red, Conf←M.P redict(F eatures)
+11:PushP redtoQueue preds
+12:ifConf >0.60andMajority(Queue preds)==P red
+then
+13:Trigger UI Command
+14:end if
+15:end while
+VII. EXPERIMENTALSETUP ANDRESULTS
+The dataset comprised 9,023 continuous sliding windows
+compiled across four distinct subjects, balancing gross and
+fine motor targets.
+A. Ablation Study Results
+The Gross Motor model achieved a baseline cross-subject
+statistical accuracy of 75.46%. The ablation study (Table II)
+reveals the critical importance of the proposed methodologies.
+=== Page 4 ===
+TABLE II
+COMPREHENSIVEABLATIONSTUDY(GROSSMOTORMODEL)
+Model Configuration Accuracy (%)
+Proposed Architecture (13 Features) 75.46%
+Ablation 1: W/O Linear Envelope 75.24%
+Ablation 2: W/O Frequency Features 74.57%
+Ablation 3: W/O 600ms Reaction-Time Purge 66.12%
+Omitting the 600ms Reaction-Time Purge caused accuracy
+to plummet by nearly 10%. Furthermore, an isolated ablation
+test on the Fine Motor model validated the Anatomical Hack.
+When polarity-sensitive features (Skewness and Kurtosis) were
+stripped, accuracy degraded to 36.28%—functionally equiva-
+lent to random guessing.
+Fig. 3. Fine Motor Confusion Matrix validating the Anatomical Hack.
+B. Computational Latency and Real-Time Viability
+A critical goal of this architecture was edge-device viability.
+Table III benchmarks the end-to-end latency of a 300ms data
+window.
+TABLE III
+SYSTEMLATENCYBENCHMARK
+Pipeline Stage Latency (ms)
+DSP Filter + Feature Extraction + Inference9.464 ms
+The entire pipeline executes in under 10 ms, yielding
+an effective processing capacity exceeding 100 Frames Per
+Second (FPS).
+VIII. DISCUSSION ANDLIMITATIONS
+While the proposed architecture successfully bridges the gap
+between low-cost hardware and functional stability, certain
+limitations remain inherent to single-channel systems. First,
+the horizontal flexor placement requires a high degree of pre-
+cision; anatomical differences between users mean the “sweet
+spot” for generating opposing polarities can vary by several
+millimeters. Secondly, while the Zero-Shot Guided Onboard-
+ing successfully mitigates initial skin impedance variations,
+prolonged continuous usage (exceeding 60 minutes) introduces
+signal drift due to sweat accumulation and muscle fatigue,
+which a static 3-second initialization cannot recursively cor-
+rect. Future iterations of this work will explore adaptive
+algorithms capable of recalibratingµandσdynamically in
+the background.
+IX. CONCLUSION
+By combining horizontal flexor placement with polarity-
+sensitive feature extraction, dynamic zero-shot calibration,
+and temporal smoothing, we have demonstrated that single-
+channel, AC-coupled sEMG sensors can achieve highly stable
+intent recognition. This sub-10ms architecture overcomes the
+spatial ambiguity of differential amplifiers, paving the way
+for seamless integration with low-cost haptic prosthetics and
+edge-deployed virtual interfaces.
+REFERENCES
+[1] Kaifosh et al., “A generic non-invasive neuromotor interface for human-
+computer interaction,”ResearchGate, 2025.
+[2] Author Name, “Transformer-based Hand Gesture Recognition via High-
+Density sEMG,”arXiv preprint arXiv:2212.00743, 2022.
+[3] D. Massicotte et al., “A Lightweight All CNN for Neuromuscular
+Activity Recognition Using Instantaneous High-Density Surface EMG,”
+UQTR, 2023.
+[4] Wu et al., “Gesture recognition method based on a single-channel sEMG
+envelope signal,” 2018.
+[5] Author Name, “A hybrid EMG-EEG interface for robust intention
+detection and fatigue-adaptive control,”PMC, 2024.
+[6] Author Name, “A Novel Feature Optimization for Wearable Human-
+Computer Interfaces Using Surface Electromyography Sensors,”MDPI
+Sensors, vol. 18, 2018.
+[7] Author Name, “EMG-based Multi-User Hand Gesture Classification via
+Unsupervised Transfer Learning,”ResearchGate, 2024.
+[8] Author Name, “Hand Gesture Prediction via Transient-phase sEMG
+using Transfer Learning,”bioRxiv, 2022.

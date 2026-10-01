@@ -1,0 +1,98 @@
+EMG Gesture Recognition Research Documentation Checklist
+Purpose: This document is an internal checklist for the research team. Fill in all details before drafting the journal paper.
+
+1. Project Information
+Project title
+Objective
+Team members
+Supervisor
+Data collection dates
+Location
+2. Participant Information
+Participant ID
+Age
+Gender
+Dominant hand
+Height
+Weight
+Medical history
+Consent obtained
+3. Data Collection Protocol
+Recording duration per participant (~20 min)
+Number of gestures
+Repetitions per gesture
+Rest interval
+Baseline recording
+Practice trial
+4. Gesture Details
+Fist
+Open Palm
+Wrist Up
+Wrist Down
+Pinch
+5. Experimental Setup
+EMG device
+Sampling frequency
+Channels
+Electrode type
+Electrode placement
+Software used
+6. Recording Conditions
+Room environment
+Participant posture
+Noise observed
+Issues during recording
+7. Signal Quality
+Motion artifacts
+50 Hz noise
+Electrode displacement
+Missing/corrupted recordings
+8. Signal Preprocessing
+Filtering
+Segmentation
+Normalization
+TKEO
+Sliding window
+Standardization
+9. Feature Extraction
+RMS
+MAV
+Waveform Length
+Zero Crossing
+Hjorth Activity
+Hjorth Mobility
+Hjorth Complexity
+Spectral Entropy
+Skewness
+Kurtosis
+10. Machine Learning Models
+SVM
+Random Forest
+KNN
+CNN
+Voting/Ensemble Classifier
+Hyperparameters
+11. Evaluation Metrics
+Accuracy
+Precision
+Recall
+F1-score
+Confusion Matrix
+Training time
+Prediction latency
+Inference time
+Generalization
+Stability
+12. Challenges & Observations
+Participant fatigue
+Electrode issues
+Noise
+Unexpected observations
+Solutions implemented
+13. Final Dataset Summary
+Total participants
+Total recordings
+Total samples
+Dataset size
+Folder structure
+Backup location

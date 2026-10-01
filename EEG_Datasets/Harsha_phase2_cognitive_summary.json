@@ -1,0 +1,14 @@
+{
+    "Participant_ID": "Harsha",
+    "Phase": "phase2_cognitive",
+    "Scalp_Position": "F3-F4 (Frontal Motor/Cognitive Strip)",
+    "Total_Samples": 45105,
+    "Rest_Baseline_Samples": 20305,
+    "Post_Session_Baseline": {
+        "Baseline_Mean_Volts": -4.7429045516385985e-06,
+        "Baseline_Noise_Std_Volts": 0.004280874516514096,
+        "Baseline_RMS_Volts": 0.004280877143913778
+    },
+    "Average_Dry_Impedance_kOhm": 162.46069573171076,
+    "Timestamp": "2026-08-18 12:34:11"
+}
