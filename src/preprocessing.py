@@ -9,44 +9,50 @@ import pandas as pd
 from scipy.signal import iirnotch, butter, filtfilt
 import src.config as cfg
 
-# Precompute bandpass filter coefficients
+# Precompute filter coefficients
+B_NOTCH, A_NOTCH = iirnotch(cfg.NOTCH_FREQ, 15.0, cfg.SAMPLE_RATE)
 B_BAND, A_BAND = butter(cfg.BANDPASS_ORDER, [cfg.BANDPASS_LOW, cfg.BANDPASS_HIGH], btype='bandpass', fs=cfg.SAMPLE_RATE)
 
 
 def filter_signal(v: np.ndarray, demean: bool = True) -> np.ndarray:
     """
-    Applies zero-phase signal conditioning:
+    Applies zero-phase sEMG signal conditioning:
     1. DC Offset Demeaning.
-    2. Adaptive Harmonic Regression (AHR): Least-squares 50 Hz, 100 Hz, 150 Hz mains hum cancellation.
-       (Completely eliminates the boundary derivative discontinuity that causes filter-ringing cone artifacts).
-    3. 4th-order Butterworth Bandpass filter (20 - 450 Hz) with zero-phase filtfilt.
+    2. Periodic Integer Padding (pad_len = 400 samples = 20 exact 50 Hz cycles).
+       - Extends the signal periodically to provide continuous phase alignment.
+       - Absorbs all filter settling transients in the sacrificial buffer.
+    3. 50 Hz IIR Notch Filter (Q = 15) to eliminate powerline interference and sideband drift.
+    4. 4th-order Butterworth Bandpass Filter (20 - 450 Hz).
+    5. Strips the sacrificial padding, yielding steady-state filtered sEMG with ZERO boundary cones.
     """
     v = np.asarray(v, dtype=np.float64)
     N = len(v)
-    if N < 20:
+    if N < 50:
         return v
         
     # 1. DC Demean
     if demean:
         v = v - np.mean(v)
         
-    # 2. Harmonic Powerline Subtraction (50 Hz and harmonics)
-    t = np.arange(N) / float(cfg.SAMPLE_RATE)
-    cols = []
-    for f in [50.0, 100.0, 150.0]:
-        cols.append(np.sin(2.0 * np.pi * f * t))
-        cols.append(np.cos(2.0 * np.pi * f * t))
-    A = np.column_stack(cols)
-    coeffs, _, _, _ = np.linalg.lstsq(A, v, rcond=None)
-    v_dehummed = v - (A @ coeffs)
-    
-    # 3. Bandpass Filtering (20 Hz - 450 Hz)
-    padlen = min(cfg.FILTER_PADLEN, N // 4)
+    # 2. Periodic Integer Padding (400 samples = 20 full cycles of 50 Hz at 1000 Hz)
+    pad_len = 400
+    if N >= pad_len:
+        v_padded = np.concatenate([v[:pad_len], v, v[-pad_len:]])
+    else:
+        v_padded = v
+        
     try:
-        v_clean = filtfilt(B_BAND, A_BAND, v_dehummed, padlen=padlen)
+        # 3. 50 Hz Notch filter
+        v_notch = filtfilt(B_NOTCH, A_NOTCH, v_padded)
+        # 4. Bandpass filter
+        v_clean = filtfilt(B_BAND, A_BAND, v_notch)
+        
+        # 5. Discard sacrificial padding
+        if N >= pad_len:
+            return v_clean[pad_len : pad_len + N]
         return v_clean
     except Exception:
-        return v_dehummed
+        return v
 
 
 def load_participant_data(participant_name: str, datasets_dir: str = "All_Datasets") -> pd.DataFrame:

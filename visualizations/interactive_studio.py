@@ -219,7 +219,7 @@ class InteractiveGestureStudio:
         # 2. BOTTOM SUBPLOT: Clean Filtered Signal (Millivolts)
         ax_clean.plot(time_axis, clean_sig * 1000.0, color=color, lw=1.2, label=f"Clean Filtered sEMG (mV)")
         ax_clean.axvspan(cfg.ACTIVE_START_SEC, cfg.ACTIVE_END_SEC, color="#f1f2f6", alpha=0.5)
-        ax_clean.set_title(f"CLEAN FILTERED sEMG (AHR 50Hz Subtraction + 20-450Hz Bandpass)\n[Zero cone boundary artifact — pure isometric contraction burst]", fontsize=11, fontweight="bold", pad=8)
+        ax_clean.set_title(f"CLEAN FILTERED sEMG (50Hz Notch + Periodic Pad Buffer + 20-450Hz Bandpass)\n[Zero cone boundary artifact — steady-state isometric contraction]", fontsize=11, fontweight="bold", pad=8)
         ax_clean.set_xlabel("Time (seconds) — [Zoom in on either plot; both synchronize automatically]", fontsize=10, fontweight="bold")
         ax_clean.set_ylabel("Filtered (mV)", fontdict={"weight": "bold", "size": 10})
         ax_clean.grid(True, linestyle=":", alpha=0.6)
