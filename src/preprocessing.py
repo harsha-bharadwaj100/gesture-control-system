@@ -49,8 +49,21 @@ def filter_signal(v: np.ndarray, demean: bool = True) -> np.ndarray:
         
         # 5. Discard sacrificial padding
         if N >= pad_len:
-            return v_clean[pad_len : pad_len + N]
-        return v_clean
+            clean = v_clean[pad_len : pad_len + N]
+        else:
+            clean = v_clean
+            
+        # 6. Apply smooth Tukey cosine taper to the first 200 ms and last 200 ms
+        # (This extinguishes the residual IIR settling transient during the 0.0-0.2s reaction latency
+        # while leaving the 0.6s - 3.4s active analysis plateau 100% bit-exact and untouched).
+        taper_len = min(200, N // 8)
+        if taper_len > 10:
+            taper_in = 0.5 * (1.0 - np.cos(np.pi * np.arange(taper_len) / float(taper_len)))
+            taper_out = 0.5 * (1.0 + np.cos(np.pi * np.arange(taper_len) / float(taper_len)))
+            clean[:taper_len] *= taper_in
+            clean[-taper_len:] *= taper_out
+            
+        return clean
     except Exception:
         return v
 
