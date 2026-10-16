@@ -7,6 +7,10 @@ wheels/
 __pycache__/
 *.py[oc]
 *.egg-info
+*.pkl
+models/
+.cache_datasets/
+.cache_trials/
 
 paper*
 *.pdf

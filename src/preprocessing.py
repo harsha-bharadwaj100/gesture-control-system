@@ -79,11 +79,27 @@ def load_participant_data(participant_name: str, datasets_dir: str = "All_Datase
     return pd.read_csv(path)
 
 
-def load_participant_trials(participant_name: str, datasets_dir: str = "All_Datasets", apply_filter: bool = True):
+import pickle
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_participant_trials(participant_name: str, datasets_dir: str = "All_Datasets", apply_filter: bool = True, use_cache: bool = True):
     """
     Loads and structures all 4.0-second trials for a participant.
+    Caches processed trials to disk for sub-second reloads across experiments.
     Returns: dict with keys (gesture_name, rep_index) -> 1D numpy array of length 4000
     """
+    cache_dir = os.path.join(PROJECT_ROOT, ".cache_trials")
+    cache_path = os.path.join(cache_dir, f"{participant_name}_filt{apply_filter}.pkl")
+    
+    if use_cache and os.path.exists(cache_path):
+        try:
+            with open(cache_path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+            
     df = load_participant_data(participant_name, datasets_dir)
     trials = {}
     
@@ -98,4 +114,12 @@ def load_participant_trials(participant_name: str, datasets_dir: str = "All_Data
             v_proc = v_4k - np.mean(v_4k)
         trials[(gesture, rep)] = v_proc
         
+    if use_cache:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                pickle.dump(trials, f)
+        except Exception:
+            pass
+            
     return trials
