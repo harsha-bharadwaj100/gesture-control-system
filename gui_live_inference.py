@@ -74,11 +74,21 @@ class RealTimeInferenceWorker:
         self.simulated_mode = not NIDAQ_AVAILABLE
         
         # Two-stage parameters
-        self.rest_threshold_mv = 3.5  # Lowered default to 3.5 mV for responsive contraction detection
+        self.rest_threshold_mv = 2.0  # Ultra-responsive 2.0 mV default for forearm sEMG
+        self.auto_tune_threshold = True  # Automatically tracks present resting baseline
+        self.recent_rms = collections.deque(maxlen=30)  # 3-second rolling window for floor tracking
         self.rolling_buffer = np.zeros(WINDOW_SIZE * 2, dtype=np.float64)
         self.prediction_history = collections.deque(maxlen=5)  # K=5 majority filter
         self.loop_count = 0
         self.daq_channel = CHANNEL
+        
+        # Live 12-second Present Arm Calibration State
+        self.live_calibrating = False
+        self.live_calib_steps = ["Rest", "Fist", "Open palm", "Pinch", "Wrist up", "Wrist down"]
+        self.live_calib_step_idx = 0
+        self.live_calib_step_end = 0.0
+        self.live_calib_step_duration = 2.0
+        self.live_calib_samples = collections.defaultdict(list)
         
         # Model & Profiles
         self.pipeline_pkg = {}
@@ -134,6 +144,72 @@ class RealTimeInferenceWorker:
         self.calibrating_baseline = True
         self.calib_end_time = time.time() + duration_sec
         self._send_status("CALIB_START", duration_sec)
+
+    def trigger_live_calibration(self, step_duration=2.0):
+        """Triggers rapid 12-second live calibration on the present arm."""
+        self.live_calib_step_duration = step_duration
+        self.live_calib_step_idx = 0
+        self.live_calib_samples = collections.defaultdict(list)
+        self.live_calib_step_end = time.time() + step_duration
+        self.live_calibrating = True
+        first_cue = self.live_calib_steps[0]
+        self._send_status("LIVE_CALIB_STEP", (first_cue, step_duration))
+        print(f"[LIVE CALIB] Starting 12-second arm adaptation. Step 1: {first_cue}", flush=True)
+
+    def _fit_live_subject_model(self):
+        try:
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+            from sklearn.svm import SVC
+            from sklearn.ensemble import RandomForestClassifier
+
+            # 1. Calibrate Rest Threshold based on present baseline
+            rest_rms_vals = self.live_calib_samples.get("Rest", [1.5])
+            mu_r = float(np.mean(rest_rms_vals))
+            sigma_r = float(np.std(rest_rms_vals))
+            calib_thresh = max(1.2, round(mu_r + 1.8 * sigma_r, 2))
+            self.rest_threshold_mv = calib_thresh
+            
+            # 2. Build training set for 5 active gestures
+            X_list, y_list = [], []
+            for g in cfg.GESTURES:
+                samples = self.live_calib_samples.get(g, [])
+                if len(samples) > 0:
+                    X_list.extend(samples)
+                    y_list.extend([g] * len(samples))
+                    
+            if len(X_list) >= 15:
+                X_arr = np.array(X_list, dtype=np.float64)
+                y_arr = np.array(y_list)
+                
+                sc = StandardScaler().fit(X_arr)
+                X_sc = sc.transform(X_arr)
+                
+                svm_m = SVC(kernel="rbf", C=5.0, probability=True, random_state=42).fit(X_sc, y_arr)
+                rf_m = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42).fit(X_sc, y_arr)
+                lda_m = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto").fit(X_sc, y_arr)
+                
+                prof_name = "Live Subject (Present Arm)"
+                self.pipeline_pkg[prof_name] = {
+                    "scaler": sc,
+                    "svm_model": svm_m,
+                    "rf_model": rf_m,
+                    "lda_model": lda_m,
+                    "gestures": cfg.GESTURES,
+                    "feature_names": feat_mod.FEATURE_NAMES,
+                    "window_size_ms": WINDOW_SIZE,
+                    "window_step_ms": UPDATE_STEP,
+                    "optimal_k": 5
+                }
+                if prof_name not in self.available_profiles:
+                    self.available_profiles.insert(0, prof_name)
+                self.current_profile = prof_name
+                self._send_status("LIVE_CALIB_DONE", (prof_name, calib_thresh))
+                print(f"[LIVE CALIB] Live Present Arm Calibration successful! New threshold: {calib_thresh} mV", flush=True)
+            else:
+                self._send_status("ERROR", "Insufficient calibration samples captured.")
+        except Exception as e:
+            self._send_status("ERROR", f"Live calibration failed: {e}")
 
     def _worker_loop(self):
         task = None
@@ -192,8 +268,14 @@ class RealTimeInferenceWorker:
 
                 # Compute hum attenuation efficiency
                 hum_reduction = max(0.0, min(100.0, (1.0 - (clean_rms_mv / max(clean_rms_mv, raw_rms_mv))) * 100.0))
+                self.recent_rms.append(clean_rms_mv)
 
-                # 3. Baseline Calibration Handler
+                # Automatic dynamic noise floor tracking
+                if self.auto_tune_threshold and len(self.recent_rms) >= 15 and not self.live_calibrating and not self.calibrating_baseline:
+                    floor_rms = float(np.percentile(self.recent_rms, 20))
+                    self.rest_threshold_mv = max(1.2, round(floor_rms * 1.45, 2))
+
+                # 3A. Static Baseline Calibration Handler
                 if self.calibrating_baseline:
                     self.calib_samples.append(clean_rms_mv)
                     remaining = max(0.0, self.calib_end_time - time.time())
@@ -203,20 +285,42 @@ class RealTimeInferenceWorker:
                         if len(self.calib_samples) > 0:
                             mu_rest = np.mean(self.calib_samples)
                             sigma_rest = np.std(self.calib_samples)
-                            # Set threshold to mu + 2.0 sigma (min 1.5 mV)
-                            new_thresh = max(1.5, round(mu_rest + 2.0 * sigma_rest, 2))
+                            new_thresh = max(1.2, round(mu_rest + 1.8 * sigma_rest, 2))
                             self.rest_threshold_mv = new_thresh
                             self._send_status("CALIB_DONE", new_thresh)
+                    continue
+
+                # 3B. Live Present Arm 12-Second Calibration Stepper
+                if self.live_calibrating:
+                    current_cue = self.live_calib_steps[self.live_calib_step_idx]
+                    if current_cue == "Rest":
+                        self.live_calib_samples["Rest"].append(clean_rms_mv)
+                    else:
+                        f_vec = feat_mod.extract_features(clean_window, fs=float(FS))
+                        self.live_calib_samples[current_cue].append(f_vec)
+                        
+                    remaining = max(0.0, self.live_calib_step_end - time.time())
+                    self._send_status("LIVE_CALIB_TICK", (current_cue, remaining))
+                    
+                    if time.time() >= self.live_calib_step_end:
+                        self.live_calib_step_idx += 1
+                        if self.live_calib_step_idx < len(self.live_calib_steps):
+                            next_cue = self.live_calib_steps[self.live_calib_step_idx]
+                            self.live_calib_step_end = time.time() + self.live_calib_step_duration
+                            self._send_status("LIVE_CALIB_STEP", (next_cue, self.live_calib_step_duration))
+                        else:
+                            self.live_calibrating = False
+                            self._fit_live_subject_model()
                     continue
 
                 # 4. Stage 1: Energy Gate (Rest / Idle Detection)
                 is_gate_open = clean_rms_mv >= self.rest_threshold_mv
                 if not is_gate_open:
-                    self.prediction_history.append("REST")
                     final_gesture = "REST"
                     raw_pred = "REST"
                     confidence = 1.0
                     probs = np.zeros(len(cfg.GESTURES))
+                    self.prediction_history.clear()  # Immediate clear prevents REST lag on active onset
                 else:
                     # 5. Stage 2: Active 16-Feature Classification
                     f_vec = feat_mod.extract_features(clean_window, fs=float(FS))
@@ -255,7 +359,7 @@ class RealTimeInferenceWorker:
                         confidence = 0.0
                         probs = np.zeros(len(cfg.GESTURES))
 
-                    # 6. Debouncing: Rolling Majority Vote (K=5 Buffer)
+                    # 6. Debouncing: Rolling Majority Vote (K=5 Buffer across active contractions)
                     self.prediction_history.append(raw_pred)
                     vals, counts = np.unique(self.prediction_history, return_counts=True)
                     final_gesture = vals[np.argmax(counts)]
@@ -285,9 +389,6 @@ class RealTimeInferenceWorker:
                         "probabilities": probs,
                         "gestures": cfg.GESTURES
                     })
-
-            except Exception as e:
-                time.sleep(0.05)
 
             except Exception as e:
                 time.sleep(0.05)
@@ -340,8 +441,12 @@ class LiveInferenceApp:
         self.combo_profile.pack(fill=tk.X, padx=16, pady=(0, 2))
         self.combo_profile.bind("<<ComboboxSelected>>", self._on_profile_change)
         
-        lbl_prof_note = tk.Label(sidebar, text="• Pick YOUR calibrated name (e.g. harsha / guru_raj)\n• Or 'Universal' for non-calibrated subject", font=("Segoe UI", 8), fg="#48cae4", bg="#2b2d42", justify=tk.LEFT)
-        lbl_prof_note.pack(anchor=tk.W, padx=16, pady=(0, 10))
+        lbl_prof_note = tk.Label(sidebar, text="• Pick YOUR calibrated name (e.g. harsha / guru_raj)\n• Or click button below to calibrate THIS arm", font=("Segoe UI", 8), fg="#48cae4", bg="#2b2d42", justify=tk.LEFT)
+        lbl_prof_note.pack(anchor=tk.W, padx=16, pady=(0, 6))
+
+        # 1B. Rapid Live Present Arm Calibration (12s)
+        self.btn_live_calib = tk.Button(sidebar, text="🎯 Calibrate Present Arm (12s)", font=("Segoe UI", 10, "bold"), bg="#e63946", fg="#ffffff", activebackground="#ba181b", cursor="hand2", relief=tk.FLAT, pady=6, command=self._start_live_calibration)
+        self.btn_live_calib.pack(fill=tk.X, padx=16, pady=(0, 10))
 
         # 2. Classifier Architecture
         tk.Label(sidebar, text="CLASSIFIER ENGINE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
@@ -352,14 +457,19 @@ class LiveInferenceApp:
 
         # 3. Stage 1 Energy Gate Calibration
         tk.Label(sidebar, text="STAGE 1: REST ENERGY GATE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
-        self.btn_calib = tk.Button(sidebar, text="⚡ Quick Rest Calibration (3s)", font=("Segoe UI", 10, "bold"), bg="#3a86ff", fg="#ffffff", activebackground="#2667ff", cursor="hand2", relief=tk.FLAT, pady=5, command=self._start_calibration)
-        self.btn_calib.pack(fill=tk.X, padx=16, pady=(0, 6))
+        
+        self.var_auto_thresh = tk.BooleanVar(value=True)
+        self.chk_auto = tk.Checkbutton(sidebar, text="Auto-Track Baseline Noise", variable=self.var_auto_thresh, bg="#2b2d42", fg="#00f5d4", selectcolor="#121217", activebackground="#2b2d42", font=("Segoe UI", 9, "bold"), command=self._on_auto_thresh_toggle)
+        self.chk_auto.pack(anchor=tk.W, padx=16, pady=(0, 4))
 
-        self.lbl_calib_status = tk.Label(sidebar, text="Rest Threshold: 3.5 mV", font=("Segoe UI", 9), fg="#8d99ae", bg="#2b2d42")
+        self.btn_calib = tk.Button(sidebar, text="⚡ Quick Rest Baseline (3s)", font=("Segoe UI", 9, "bold"), bg="#3a86ff", fg="#ffffff", activebackground="#2667ff", cursor="hand2", relief=tk.FLAT, pady=4, command=self._start_calibration)
+        self.btn_calib.pack(fill=tk.X, padx=16, pady=(0, 4))
+
+        self.lbl_calib_status = tk.Label(sidebar, text="Rest Threshold: 2.0 mV (Auto)", font=("Segoe UI", 9), fg="#8d99ae", bg="#2b2d42")
         self.lbl_calib_status.pack(anchor=tk.W, padx=16, pady=(0, 2))
 
-        self.slider_thresh = tk.Scale(sidebar, from_=1.0, to=30.0, resolution=0.2, orient=tk.HORIZONTAL, bg="#2b2d42", fg="#ffffff", highlightthickness=0, command=self._on_slider_change)
-        self.slider_thresh.set(3.5)
+        self.slider_thresh = tk.Scale(sidebar, from_=0.8, to=30.0, resolution=0.1, orient=tk.HORIZONTAL, bg="#2b2d42", fg="#ffffff", highlightthickness=0, command=self._on_slider_change)
+        self.slider_thresh.set(2.0)
         self.slider_thresh.pack(fill=tk.X, padx=16, pady=(0, 10))
 
         # 4. Hardware DAQ Channel Selector
@@ -425,7 +535,7 @@ class LiveInferenceApp:
         # Two traces: Raw (red/orange, faint) and Filtered (cyan, bright)
         self.line_raw, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#e63946", lw=0.9, alpha=0.4, label="Raw Stream (50Hz Mains Hum)")
         self.line_clean, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#00f5d4", lw=1.3, label="Clean Filtered sEMG (Physiological)")
-        self.line_gate = self.ax_wave.axhline(3.5, color="#f1faee", linestyle="--", lw=1.2, label="Rest Gate Threshold (3.5 mV)")
+        self.line_gate = self.ax_wave.axhline(2.0, color="#f1faee", linestyle="--", lw=1.2, label="Rest Gate Threshold (2.0 mV)")
         self.line_raw.set_visible(self.show_dual_view)
         
         self.ax_wave.legend(loc="upper right", facecolor="#1e1e24", edgecolor="none", labelcolor="#edf2f4", fontsize=8)
@@ -441,6 +551,16 @@ class LiveInferenceApp:
     def _start_calibration(self):
         self.btn_calib.config(state=tk.DISABLED, text="Calibrating... (Keep Arm Relaxed)")
         self.worker.trigger_baseline_calibration(duration_sec=3.0)
+
+    def _start_live_calibration(self):
+        self.btn_live_calib.config(state=tk.DISABLED, text="Calibrating Arm...")
+        self.worker.trigger_live_calibration(step_duration=2.0)
+
+    def _on_auto_thresh_toggle(self):
+        self.worker.auto_tune_threshold = self.var_auto_thresh.get()
+        mode_str = "Auto" if self.worker.auto_tune_threshold else "Manual"
+        self.lbl_calib_status.config(text=f"Rest Threshold: {self.worker.rest_threshold_mv:.1f} mV ({mode_str})")
+        print(f"[UI] Dynamic Baseline Tracking: {mode_str}")
 
     def _on_slider_change(self, val):
         self.worker.rest_threshold_mv = float(val)
@@ -493,9 +613,27 @@ class LiveInferenceApp:
             elif msg_type == "CALIB_TICK":
                 self.lbl_calib_status.config(text=f"Relax arm... {val:.1f}s remaining")
             elif msg_type == "CALIB_DONE":
-                self.btn_calib.config(state=tk.NORMAL, text="⚡ Quick Rest Calibration (3s)")
+                self.btn_calib.config(state=tk.NORMAL, text="⚡ Quick Rest Baseline (3s)")
                 self.slider_thresh.set(val)
                 self.lbl_calib_status.config(text=f"Rest Threshold: {val:.1f} mV (Saved)")
+            elif msg_type == "LIVE_CALIB_STEP":
+                cue, dur = val
+                self.banner_frame.config(bg="#f72585")
+                self.lbl_gesture.config(text=f"CALIBRATING: {cue.upper()}", bg="#f72585")
+                self.lbl_subtext.config(text=f"Hold steady! {dur:.1f}s remaining", bg="#f72585")
+            elif msg_type == "LIVE_CALIB_TICK":
+                cue, rem = val
+                self.banner_frame.config(bg="#f72585")
+                self.lbl_gesture.config(text=f"CALIBRATING: {cue.upper()}", bg="#f72585")
+                self.lbl_subtext.config(text=f"Hold steady! {rem:.1f}s remaining", bg="#f72585")
+            elif msg_type == "LIVE_CALIB_DONE":
+                prof_name, thresh = val
+                self.btn_live_calib.config(state=tk.NORMAL, text="🎯 Calibrate Present Arm (12s)")
+                self.combo_profile.config(values=self.worker.available_profiles)
+                self.combo_profile.set(prof_name)
+                self.slider_thresh.set(thresh)
+                self.lbl_calib_status.config(text=f"Rest Threshold: {thresh:.1f} mV (Tuned)")
+                messagebox.showinfo("Arm Calibrated!", f"Model personalized for Present Arm!\nRest Threshold tuned to {thresh:.1f} mV.")
 
         # 2. Process Live Data Frames
         if not self.data_queue.empty():
@@ -511,19 +649,25 @@ class LiveInferenceApp:
             conf = frame["confidence"]
             probs = frame["probabilities"]
 
+            # If auto-tuning is enabled and not calibrating, update slider dynamically
+            if self.var_auto_thresh.get() and not self.worker.live_calibrating and not self.worker.calibrating_baseline:
+                self.slider_thresh.set(thresh_mv)
+                self.lbl_calib_status.config(text=f"Rest Threshold: {thresh_mv:.1f} mV (Auto)")
+
             # Update Banner Color and Text
-            bg_color = GESTURE_COLORS.get(gesture, "#7f8c8d")
-            self.banner_frame.config(bg=bg_color)
-            self.lbl_gesture.config(text=gesture.upper(), bg=bg_color)
-            self.lbl_subtext.config(bg=bg_color)
-            
-            if not gate_open:
-                if clean_rms > 1.8:
-                    self.lbl_subtext.config(text=f"⚠️ Flexing ({clean_rms:.1f} mV) below gate ({thresh_mv:.1f} mV) -> Lower slider on left to trigger!")
+            if not self.worker.live_calibrating:
+                bg_color = GESTURE_COLORS.get(gesture, "#7f8c8d")
+                self.banner_frame.config(bg=bg_color)
+                self.lbl_gesture.config(text=gesture.upper(), bg=bg_color)
+                self.lbl_subtext.config(bg=bg_color)
+                
+                if not gate_open:
+                    if clean_rms > 1.2:
+                        self.lbl_subtext.config(text=f"⚠️ Flexing ({clean_rms:.1f} mV) below gate ({thresh_mv:.1f} mV) -> Lower slider or flex firmer!")
+                    else:
+                        self.lbl_subtext.config(text=f"Arm Relaxed (Energy: {clean_rms:.1f} mV < Gate: {thresh_mv:.1f} mV)")
                 else:
-                    self.lbl_subtext.config(text=f"Arm Relaxed (Energy: {clean_rms:.1f} mV < Gate: {thresh_mv:.1f} mV)")
-            else:
-                self.lbl_subtext.config(text=f"Confidence: {conf*100:.1f}% | K=5 Rolling Filter Active")
+                    self.lbl_subtext.config(text=f"Confidence: {conf*100:.1f}% | K=5 Majority Active")
             
             gate_status = "REST / IDLE" if not gate_open else "ACTIVE CONTRACTION"
             self.lbl_metrics.config(
