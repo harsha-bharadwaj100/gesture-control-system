@@ -74,9 +74,11 @@ class RealTimeInferenceWorker:
         self.simulated_mode = not NIDAQ_AVAILABLE
         
         # Two-stage parameters
-        self.rest_threshold_mv = 8.0  # Default 8 mV
+        self.rest_threshold_mv = 3.5  # Lowered default to 3.5 mV for responsive contraction detection
         self.rolling_buffer = np.zeros(WINDOW_SIZE * 2, dtype=np.float64)
         self.prediction_history = collections.deque(maxlen=5)  # K=5 majority filter
+        self.loop_count = 0
+        self.daq_channel = CHANNEL
         
         # Model & Profiles
         self.pipeline_pkg = {}
@@ -135,11 +137,12 @@ class RealTimeInferenceWorker:
 
     def _worker_loop(self):
         task = None
+        current_chan = getattr(self, "daq_channel", CHANNEL)
         if not self.simulated_mode and NIDAQ_AVAILABLE:
             try:
                 task = nidaqmx.Task()
                 task.ai_channels.add_ai_voltage_chan(
-                    CHANNEL,
+                    current_chan,
                     terminal_config=TerminalConfiguration.DIFF,
                     min_val=-5.0,
                     max_val=5.0
@@ -150,7 +153,7 @@ class RealTimeInferenceWorker:
                     samps_per_chan=UPDATE_STEP * 4
                 )
                 task.start()
-                self._send_status("HARDWARE", f"🟢 HARDWARE CONNECTED: NI-DAQ ({CHANNEL}) @ 1000 Hz")
+                self._send_status("HARDWARE", f"🟢 HARDWARE CONNECTED: NI-DAQ ({current_chan}) @ 1000 Hz")
             except Exception as e:
                 self._send_status("HARDWARE", f"⚠️ NI-DAQ ERROR ({e}) -> Running Simulation Mode")
                 self.simulated_mode = True
@@ -200,16 +203,18 @@ class RealTimeInferenceWorker:
                         if len(self.calib_samples) > 0:
                             mu_rest = np.mean(self.calib_samples)
                             sigma_rest = np.std(self.calib_samples)
-                            # Set threshold to mu + 2.5 sigma
-                            new_thresh = max(3.0, round(mu_rest + 2.5 * sigma_rest, 2))
+                            # Set threshold to mu + 2.0 sigma (min 1.5 mV)
+                            new_thresh = max(1.5, round(mu_rest + 2.0 * sigma_rest, 2))
                             self.rest_threshold_mv = new_thresh
                             self._send_status("CALIB_DONE", new_thresh)
                     continue
 
                 # 4. Stage 1: Energy Gate (Rest / Idle Detection)
-                if clean_rms_mv < self.rest_threshold_mv:
+                is_gate_open = clean_rms_mv >= self.rest_threshold_mv
+                if not is_gate_open:
                     self.prediction_history.append("REST")
                     final_gesture = "REST"
+                    raw_pred = "REST"
                     confidence = 1.0
                     probs = np.zeros(len(cfg.GESTURES))
                 else:
@@ -228,15 +233,21 @@ class RealTimeInferenceWorker:
                         else:
                             clf = profile_data["lda_model"]
                             
+                        # Scikit-learn alphabetical classes ground truth
+                        classes = list(clf.classes_) if hasattr(clf, "classes_") else cfg.GESTURES
                         if hasattr(clf, "predict_proba"):
-                            probs = clf.predict_proba(f_scaled)[0]
-                            max_idx = np.argmax(probs)
-                            raw_pred = profile_data["gestures"][max_idx]
-                            confidence = float(probs[max_idx])
+                            raw_probs = clf.predict_proba(f_scaled)[0]
+                            max_idx = int(np.argmax(raw_probs))
+                            raw_pred = str(classes[max_idx])
+                            confidence = float(raw_probs[max_idx])
+                            
+                            # Reorder probabilities to match standard cfg.GESTURES order for UI bars
+                            probs_dict = {cls_name: p for cls_name, p in zip(classes, raw_probs)}
+                            probs = np.array([probs_dict.get(g, 0.0) for g in cfg.GESTURES], dtype=np.float64)
                         else:
-                            raw_pred = clf.predict(f_scaled)[0]
+                            raw_pred = str(clf.predict(f_scaled)[0])
                             confidence = 0.85
-                            probs = np.zeros(len(cfg.GESTURES))
+                            probs = np.zeros(len(cfg.GESTURES), dtype=np.float64)
                             if raw_pred in cfg.GESTURES:
                                 probs[cfg.GESTURES.index(raw_pred)] = 1.0
                     else:
@@ -249,6 +260,16 @@ class RealTimeInferenceWorker:
                     vals, counts = np.unique(self.prediction_history, return_counts=True)
                     final_gesture = vals[np.argmax(counts)]
 
+                # Live Console Telemetry (every 1 second = 10 frames)
+                self.loop_count += 1
+                if self.loop_count % 10 == 0:
+                    mode_str = "HARDWARE" if not self.simulated_mode else "SIMULATION"
+                    if is_gate_open:
+                        print(f"[{mode_str}] Clean RMS: {clean_rms_mv:5.1f} mV | Gate: OPEN | Raw: {raw_pred:10s} -> Filtered: {final_gesture:10s} ({confidence*100:4.1f}%) | Model: {self.current_model_type.upper()} ({self.current_profile})", flush=True)
+                    else:
+                        contraction_hint = " (Muscle flexing detected! Lower slider on left to open gate)" if clean_rms_mv > 1.8 else ""
+                        print(f"[{mode_str}] Clean RMS: {clean_rms_mv:5.1f} mV < Thresh: {self.rest_threshold_mv:.1f} mV | Gate: REST{contraction_hint}", flush=True)
+
                 # Push frame to GUI display queue
                 if not self.data_queue.full():
                     self.data_queue.put({
@@ -258,11 +279,15 @@ class RealTimeInferenceWorker:
                         "rms_mv": clean_rms_mv,
                         "hum_reduction": hum_reduction,
                         "threshold_mv": self.rest_threshold_mv,
+                        "gate_open": is_gate_open,
                         "gesture": final_gesture,
                         "confidence": confidence,
                         "probabilities": probs,
                         "gestures": cfg.GESTURES
                     })
+
+            except Exception as e:
+                time.sleep(0.05)
 
             except Exception as e:
                 time.sleep(0.05)
@@ -309,55 +334,68 @@ class LiveInferenceApp:
         sidebar.pack(fill=tk.Y, side=tk.LEFT, padx=12, pady=12)
 
         # 1. Profile Selection
-        tk.Label(sidebar, text="SUBJECT / COHORT PROFILE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(16, 4))
+        tk.Label(sidebar, text="SUBJECT / COHORT PROFILE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(12, 4))
         self.combo_profile = ttk.Combobox(sidebar, values=self.worker.available_profiles, state="readonly", font=("Segoe UI", 10))
         self.combo_profile.set(self.worker.current_profile)
-        self.combo_profile.pack(fill=tk.X, padx=16, pady=(0, 4))
+        self.combo_profile.pack(fill=tk.X, padx=16, pady=(0, 2))
         self.combo_profile.bind("<<ComboboxSelected>>", self._on_profile_change)
         
-        lbl_prof_note = tk.Label(sidebar, text="• Universal: Works for anyone in lab\n• Or pick Harsha/Guru Raj for calibrated arm", font=("Segoe UI", 8), fg="#8d99ae", bg="#2b2d42", justify=tk.LEFT)
-        lbl_prof_note.pack(anchor=tk.W, padx=16, pady=(0, 12))
+        lbl_prof_note = tk.Label(sidebar, text="• Pick YOUR calibrated name (e.g. harsha / guru_raj)\n• Or 'Universal' for non-calibrated subject", font=("Segoe UI", 8), fg="#48cae4", bg="#2b2d42", justify=tk.LEFT)
+        lbl_prof_note.pack(anchor=tk.W, padx=16, pady=(0, 10))
 
         # 2. Classifier Architecture
-        tk.Label(sidebar, text="CLASSIFIER ENGINE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
+        tk.Label(sidebar, text="CLASSIFIER ENGINE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
         self.combo_model = ttk.Combobox(sidebar, values=["Support Vector Machine (SVM-RBF)", "Random Forest (RF)", "Linear Discriminant (LDA)"], state="readonly", font=("Segoe UI", 10))
         self.combo_model.set("Support Vector Machine (SVM-RBF)")
-        self.combo_model.pack(fill=tk.X, padx=16, pady=(0, 16))
+        self.combo_model.pack(fill=tk.X, padx=16, pady=(0, 10))
         self.combo_model.bind("<<ComboboxSelected>>", self._on_model_change)
 
         # 3. Stage 1 Energy Gate Calibration
-        tk.Label(sidebar, text="STAGE 1: REST ENERGY GATE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
-        self.btn_calib = tk.Button(sidebar, text="⚡ Quick Rest Calibration (3s)", font=("Segoe UI", 10, "bold"), bg="#3a86ff", fg="#ffffff", activebackground="#2667ff", cursor="hand2", relief=tk.FLAT, pady=6, command=self._start_calibration)
-        self.btn_calib.pack(fill=tk.X, padx=16, pady=(0, 8))
+        tk.Label(sidebar, text="STAGE 1: REST ENERGY GATE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
+        self.btn_calib = tk.Button(sidebar, text="⚡ Quick Rest Calibration (3s)", font=("Segoe UI", 10, "bold"), bg="#3a86ff", fg="#ffffff", activebackground="#2667ff", cursor="hand2", relief=tk.FLAT, pady=5, command=self._start_calibration)
+        self.btn_calib.pack(fill=tk.X, padx=16, pady=(0, 6))
 
-        self.lbl_calib_status = tk.Label(sidebar, text="Rest Threshold: 8.0 mV", font=("Segoe UI", 9), fg="#8d99ae", bg="#2b2d42")
-        self.lbl_calib_status.pack(anchor=tk.W, padx=16, pady=(0, 4))
+        self.lbl_calib_status = tk.Label(sidebar, text="Rest Threshold: 3.5 mV", font=("Segoe UI", 9), fg="#8d99ae", bg="#2b2d42")
+        self.lbl_calib_status.pack(anchor=tk.W, padx=16, pady=(0, 2))
 
-        self.slider_thresh = tk.Scale(sidebar, from_=2.0, to=40.0, resolution=0.5, orient=tk.HORIZONTAL, bg="#2b2d42", fg="#ffffff", highlightthickness=0, command=self._on_slider_change)
-        self.slider_thresh.set(8.0)
-        self.slider_thresh.pack(fill=tk.X, padx=16, pady=(0, 16))
+        self.slider_thresh = tk.Scale(sidebar, from_=1.0, to=30.0, resolution=0.2, orient=tk.HORIZONTAL, bg="#2b2d42", fg="#ffffff", highlightthickness=0, command=self._on_slider_change)
+        self.slider_thresh.set(3.5)
+        self.slider_thresh.pack(fill=tk.X, padx=16, pady=(0, 10))
 
-        # 4. View Switch: Single Filtered vs Raw+Filtered
-        tk.Label(sidebar, text="OSCILLOSCOPE VIEW", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
-        self.btn_view = tk.Button(sidebar, text="👁️ Toggle Raw vs Filtered View", font=("Segoe UI", 9, "bold"), bg="#4a4e69", fg="#ffffff", activebackground="#22223b", relief=tk.FLAT, pady=5, command=self._toggle_view)
-        self.btn_view.pack(fill=tk.X, padx=16, pady=(0, 16))
+        # 4. Hardware DAQ Channel Selector
+        tk.Label(sidebar, text="NI-DAQ CHANNEL", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
+        f_daq = tk.Frame(sidebar, bg="#2b2d42")
+        f_daq.pack(fill=tk.X, padx=16, pady=(0, 10))
+        self.combo_chan = ttk.Combobox(f_daq, values=["Dev1/ai0", "Dev2/ai0", "Dev1/ai1", "Dev2/ai1"], width=10, font=("Segoe UI", 9))
+        self.combo_chan.set("Dev1/ai0")
+        self.combo_chan.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        btn_reconnect = tk.Button(f_daq, text="Connect", font=("Segoe UI", 9, "bold"), bg="#06d6a0", fg="#000000", relief=tk.FLAT, command=self._reconnect_daq)
+        btn_reconnect.pack(side=tk.RIGHT)
 
-        # 5. Mode Switch: Hardware vs Simulation
-        tk.Label(sidebar, text="OPERATION MODE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
+        # 5. View Switch: Single Filtered vs Raw+Filtered
+        tk.Label(sidebar, text="OSCILLOSCOPE VIEW", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
+        self.btn_view = tk.Button(sidebar, text="👁️ Toggle Raw vs Filtered View", font=("Segoe UI", 9, "bold"), bg="#4a4e69", fg="#ffffff", activebackground="#22223b", relief=tk.FLAT, pady=4, command=self._toggle_view)
+        self.btn_view.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        # 6. Mode Switch: Hardware vs Simulation
+        tk.Label(sidebar, text="OPERATION MODE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(6, 4))
         self.btn_mode = tk.Button(sidebar, text="Switch to Simulation Mode" if NIDAQ_AVAILABLE else "Simulation Mode (DAQ Missing)", font=("Segoe UI", 9), bg="#5c677d", fg="#ffffff", activebackground="#33415c", relief=tk.FLAT, pady=4, command=self._toggle_mode)
-        self.btn_mode.pack(fill=tk.X, padx=16, pady=(0, 16))
+        self.btn_mode.pack(fill=tk.X, padx=16, pady=(0, 10))
 
         # Main Dashboard Display (Right)
         main_panel = tk.Frame(self.root, bg="#1e1e24")
         main_panel.pack(fill=tk.BOTH, expand=True, side=tk.RIGHT, padx=12, pady=12)
 
         # Big Gesture Banner
-        self.banner_frame = tk.Frame(main_panel, bg="#7f8c8d", height=85)
+        self.banner_frame = tk.Frame(main_panel, bg="#7f8c8d", height=95)
         self.banner_frame.pack(fill=tk.X, side=tk.TOP, pady=(0, 8))
         self.banner_frame.pack_propagate(False)
 
-        self.lbl_gesture = tk.Label(self.banner_frame, text="REST / IDLE", font=("Segoe UI", 28, "bold"), fg="#ffffff", bg="#7f8c8d")
-        self.lbl_gesture.pack(expand=True)
+        self.lbl_gesture = tk.Label(self.banner_frame, text="REST / IDLE", font=("Segoe UI", 26, "bold"), fg="#ffffff", bg="#7f8c8d")
+        self.lbl_gesture.pack(pady=(4, 0))
+        
+        self.lbl_subtext = tk.Label(self.banner_frame, text="Arm Relaxed | Ready for Gesture Contraction", font=("Segoe UI", 10), fg="#f1faee", bg="#7f8c8d")
+        self.lbl_subtext.pack(pady=(0, 4))
 
         # Live Signal Diagnostics Header
         self.lbl_metrics = tk.Label(main_panel, text="Raw: 0.0 mV | Filtered: 0.0 mV | Gate: REST | Conf: 100%", font=("Segoe UI", 10, "bold"), fg="#00f5d4", bg="#1e1e24")
@@ -385,9 +423,9 @@ class LiveInferenceApp:
         t_ms = np.linspace(0, 500, WINDOW_SIZE)
         
         # Two traces: Raw (red/orange, faint) and Filtered (cyan, bright)
-        self.line_raw, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#e63946", lw=0.9, alpha=0.4, label="Raw Stream (50Hz Hum)")
-        self.line_clean, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#00f5d4", lw=1.3, label="Clean Filtered sEMG")
-        self.line_gate = self.ax_wave.axhline(8.0, color="#f1faee", linestyle="--", lw=1.0, label="Rest Gate Threshold")
+        self.line_raw, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#e63946", lw=0.9, alpha=0.4, label="Raw Stream (50Hz Mains Hum)")
+        self.line_clean, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#00f5d4", lw=1.3, label="Clean Filtered sEMG (Physiological)")
+        self.line_gate = self.ax_wave.axhline(3.5, color="#f1faee", linestyle="--", lw=1.2, label="Rest Gate Threshold (3.5 mV)")
         self.line_raw.set_visible(self.show_dual_view)
         
         self.ax_wave.legend(loc="upper right", facecolor="#1e1e24", edgecolor="none", labelcolor="#edf2f4", fontsize=8)
@@ -438,6 +476,14 @@ class LiveInferenceApp:
         self.worker.start(simulated=new_mode)
         self.btn_mode.config(text="Switch to Hardware Mode" if new_mode else "Switch to Simulation Mode")
 
+    def _reconnect_daq(self):
+        selected_chan = self.combo_chan.get().strip()
+        self.worker.daq_channel = selected_chan
+        print(f"[UI] Reconnecting NI-DAQ on: {selected_chan}")
+        self.worker.stop()
+        time.sleep(0.3)
+        self.worker.start(simulated=False)
+
     def _gui_update_loop(self):
         # 1. Process Status Events
         while not self.status_queue.empty():
@@ -460,6 +506,7 @@ class LiveInferenceApp:
             clean_rms = frame["rms_mv"]
             hum_red = frame["hum_reduction"]
             thresh_mv = frame["threshold_mv"]
+            gate_open = frame.get("gate_open", False)
             gesture = frame["gesture"]
             conf = frame["confidence"]
             probs = frame["probabilities"]
@@ -468,8 +515,17 @@ class LiveInferenceApp:
             bg_color = GESTURE_COLORS.get(gesture, "#7f8c8d")
             self.banner_frame.config(bg=bg_color)
             self.lbl_gesture.config(text=gesture.upper(), bg=bg_color)
+            self.lbl_subtext.config(bg=bg_color)
             
-            gate_status = "REST / IDLE" if gesture == "REST" else "ACTIVE CONTRACTION"
+            if not gate_open:
+                if clean_rms > 1.8:
+                    self.lbl_subtext.config(text=f"⚠️ Flexing ({clean_rms:.1f} mV) below gate ({thresh_mv:.1f} mV) -> Lower slider on left to trigger!")
+                else:
+                    self.lbl_subtext.config(text=f"Arm Relaxed (Energy: {clean_rms:.1f} mV < Gate: {thresh_mv:.1f} mV)")
+            else:
+                self.lbl_subtext.config(text=f"Confidence: {conf*100:.1f}% | K=5 Rolling Filter Active")
+            
+            gate_status = "REST / IDLE" if not gate_open else "ACTIVE CONTRACTION"
             self.lbl_metrics.config(
                 text=f"Raw RMS: {raw_rms:5.1f} mV | Clean RMS: {clean_rms:4.1f} mV ({hum_red:4.1f}% Hum Scrubbed) | Gate: {gate_status} (Thresh: {thresh_mv:.1f} mV) | Conf: {conf*100:4.1f}%"
             )
