@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 os.environ["MPLCONFIGDIR"] = tempfile.gettempdir()
+
 import time
 import queue
 import threading
@@ -79,8 +80,9 @@ class RealTimeInferenceWorker:
         
         # Model & Profiles
         self.pipeline_pkg = {}
-        self.current_profile = "harsha" if "harsha" in cfg.CLEAN_COHORT else cfg.CLEAN_COHORT[0]
+        self.current_profile = "Universal (All Cohort)"
         self.current_model_type = "svm"  # "svm", "rf", "lda"
+        self.available_profiles = []
         
         # Calibration state
         self.calibrating_baseline = False
@@ -88,19 +90,30 @@ class RealTimeInferenceWorker:
         
         self.load_models()
 
+    def _send_status(self, msg_type, val):
+        if self.status_queue is not None:
+            try:
+                self.status_queue.put((msg_type, val))
+            except Exception:
+                pass
+
     def load_models(self):
         if os.path.exists(MODEL_PKG_PATH):
             try:
                 with open(MODEL_PKG_PATH, "rb") as f:
                     self.pipeline_pkg = pickle.load(f)
-                available = list(self.pipeline_pkg.keys())
-                if self.current_profile not in self.pipeline_pkg and available:
-                    self.current_profile = available[0]
-                self.status_queue.put(("STATUS", f"Loaded production models ({len(available)} profiles available)"))
+                profiles = list(self.pipeline_pkg.keys())
+                # Ensure Universal is first if available
+                if "Universal (All Cohort)" in profiles:
+                    profiles.remove("Universal (All Cohort)")
+                    profiles = ["Universal (All Cohort)"] + profiles
+                self.available_profiles = profiles
+                self.current_profile = profiles[0]
+                self._send_status("STATUS", f"Loaded {len(profiles)} profiles (Default: {self.current_profile})")
             except Exception as e:
-                self.status_queue.put(("ERROR", f"Failed to load models: {e}"))
+                self._send_status("ERROR", f"Failed to load models: {e}")
         else:
-            self.status_queue.put(("ERROR", "production_pipeline.pkl missing in models/!"))
+            self._send_status("ERROR", "production_pipeline.pkl missing in models/!")
 
     def start(self, simulated=False):
         if self.running:
@@ -118,7 +131,7 @@ class RealTimeInferenceWorker:
         self.calib_samples = []
         self.calibrating_baseline = True
         self.calib_end_time = time.time() + duration_sec
-        self.status_queue.put(("CALIB_START", duration_sec))
+        self._send_status("CALIB_START", duration_sec)
 
     def _worker_loop(self):
         task = None
@@ -137,9 +150,9 @@ class RealTimeInferenceWorker:
                     samps_per_chan=UPDATE_STEP * 4
                 )
                 task.start()
-                self.status_queue.put(("HARDWARE", f"Connected to NI-DAQ on {CHANNEL} @ 1000 Hz"))
+                self._send_status("HARDWARE", f"🟢 HARDWARE CONNECTED: NI-DAQ ({CHANNEL}) @ 1000 Hz")
             except Exception as e:
-                self.status_queue.put(("HARDWARE", f"NI-DAQ Error ({e}). Running in Simulation Mode."))
+                self._send_status("HARDWARE", f"⚠️ NI-DAQ ERROR ({e}) -> Running Simulation Mode")
                 self.simulated_mode = True
                 if task:
                     try: task.close()
@@ -147,7 +160,7 @@ class RealTimeInferenceWorker:
                 task = None
         else:
             self.simulated_mode = True
-            self.status_queue.put(("HARDWARE", "Simulation Mode Active (Virtual Biopotential Generator)"))
+            self._send_status("HARDWARE", "⚠️ SIMULATION MODE (Virtual Biopotential Generator)")
 
         while self.running:
             try:
@@ -156,9 +169,9 @@ class RealTimeInferenceWorker:
                     raw_chunk = task.read(number_of_samples_per_channel=UPDATE_STEP)
                 else:
                     time.sleep(UPDATE_STEP / FS)
-                    # Synthetic noise generator when hardware is absent
+                    # Simulated physical arm: 300 mV 50 Hz hum + baseline noise
                     t_sub = np.linspace(0, UPDATE_STEP/FS, UPDATE_STEP, endpoint=False)
-                    raw_chunk = np.random.normal(0, 0.005, UPDATE_STEP) + 0.02 * np.sin(2 * np.pi * 50 * t_sub)
+                    raw_chunk = np.random.normal(0, 0.005, UPDATE_STEP) + 0.25 * np.sin(2 * np.pi * 50 * t_sub)
 
                 raw_chunk = np.array(raw_chunk, dtype=np.float64)
                 
@@ -170,14 +183,18 @@ class RealTimeInferenceWorker:
                 raw_window = self.rolling_buffer[-WINDOW_SIZE:]
 
                 # 2. Real-Time ARHD Signal Conditioning (50Hz hum removal + 20-450Hz Bandpass)
+                raw_rms_mv = float(np.sqrt(np.mean(raw_window ** 2)) * 1000.0)
                 clean_window = prep.filter_signal(raw_window, demean=True)
-                rms_voltage_mv = float(np.sqrt(np.mean(clean_window ** 2)) * 1000.0)
+                clean_rms_mv = float(np.sqrt(np.mean(clean_window ** 2)) * 1000.0)
+
+                # Compute hum attenuation efficiency
+                hum_reduction = max(0.0, min(100.0, (1.0 - (clean_rms_mv / max(clean_rms_mv, raw_rms_mv))) * 100.0))
 
                 # 3. Baseline Calibration Handler
                 if self.calibrating_baseline:
-                    self.calib_samples.append(rms_voltage_mv)
+                    self.calib_samples.append(clean_rms_mv)
                     remaining = max(0.0, self.calib_end_time - time.time())
-                    self.status_queue.put(("CALIB_TICK", remaining))
+                    self._send_status("CALIB_TICK", remaining)
                     if time.time() >= self.calib_end_time:
                         self.calibrating_baseline = False
                         if len(self.calib_samples) > 0:
@@ -186,11 +203,11 @@ class RealTimeInferenceWorker:
                             # Set threshold to mu + 2.5 sigma
                             new_thresh = max(3.0, round(mu_rest + 2.5 * sigma_rest, 2))
                             self.rest_threshold_mv = new_thresh
-                            self.status_queue.put(("CALIB_DONE", new_thresh))
+                            self._send_status("CALIB_DONE", new_thresh)
                     continue
 
                 # 4. Stage 1: Energy Gate (Rest / Idle Detection)
-                if rms_voltage_mv < self.rest_threshold_mv:
+                if clean_rms_mv < self.rest_threshold_mv:
                     self.prediction_history.append("REST")
                     final_gesture = "REST"
                     confidence = 1.0
@@ -218,7 +235,7 @@ class RealTimeInferenceWorker:
                             confidence = float(probs[max_idx])
                         else:
                             raw_pred = clf.predict(f_scaled)[0]
-                            confidence = 0.8
+                            confidence = 0.85
                             probs = np.zeros(len(cfg.GESTURES))
                             if raw_pred in cfg.GESTURES:
                                 probs[cfg.GESTURES.index(raw_pred)] = 1.0
@@ -235,8 +252,11 @@ class RealTimeInferenceWorker:
                 # Push frame to GUI display queue
                 if not self.data_queue.full():
                     self.data_queue.put({
+                        "raw_waveform": raw_window * 1000.0,     # in mV
                         "clean_waveform": clean_window * 1000.0, # in mV
-                        "rms_mv": rms_voltage_mv,
+                        "raw_rms_mv": raw_rms_mv,
+                        "rms_mv": clean_rms_mv,
+                        "hum_reduction": hum_reduction,
                         "threshold_mv": self.rest_threshold_mv,
                         "gesture": final_gesture,
                         "confidence": confidence,
@@ -260,13 +280,14 @@ class LiveInferenceApp:
     def __init__(self, root):
         self.root = root
         self.root.title("sEMG Live Inference System | Two-Stage Gesture Recognition")
-        self.root.geometry("1200x780")
+        self.root.geometry("1260x820")
         self.root.configure(bg="#1e1e24")
-        self.root.minsize(1000, 700)
+        self.root.minsize(1050, 720)
 
         self.data_queue = queue.Queue(maxsize=3)
         self.status_queue = queue.Queue(maxsize=10)
         self.worker = RealTimeInferenceWorker(self.data_queue, self.status_queue)
+        self.show_dual_view = False  # Toggle between single filtered vs raw+filtered
 
         self._build_ui()
         self.worker.start(simulated=not NIDAQ_AVAILABLE)
@@ -277,22 +298,25 @@ class LiveInferenceApp:
         header = tk.Frame(self.root, bg="#2b2d42", height=60)
         header.pack(fill=tk.X, side=tk.TOP)
         
-        lbl_title = tk.Label(header, text="SINGLE-CHANNEL sEMG LIVE INFERENCE ENGINE", font=("Segoe UI", 15, "bold"), fg="#ffffff", bg="#2b2d42")
+        lbl_title = tk.Label(header, text="SINGLE-CHANNEL sEMG LIVE INFERENCE ENGINE", font=("Segoe UI", 14, "bold"), fg="#ffffff", bg="#2b2d42")
         lbl_title.pack(side=tk.LEFT, padx=20, pady=12)
 
-        self.lbl_hw_status = tk.Label(header, text="Checking Hardware...", font=("Segoe UI", 10, "italic"), fg="#8d99ae", bg="#2b2d42")
+        self.lbl_hw_status = tk.Label(header, text="Checking Hardware...", font=("Segoe UI", 10, "bold"), fg="#48cae4", bg="#2b2d42")
         self.lbl_hw_status.pack(side=tk.RIGHT, padx=20)
 
         # Control Panel (Left / Sidebar)
-        sidebar = tk.Frame(self.root, bg="#2b2d42", width=320)
+        sidebar = tk.Frame(self.root, bg="#2b2d42", width=340)
         sidebar.pack(fill=tk.Y, side=tk.LEFT, padx=12, pady=12)
 
         # 1. Profile Selection
-        tk.Label(sidebar, text="SUBJECT PROFILE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(16, 4))
-        self.combo_profile = ttk.Combobox(sidebar, values=cfg.CLEAN_COHORT, state="readonly", font=("Segoe UI", 10))
-        self.combo_profile.set("harsha" if "harsha" in cfg.CLEAN_COHORT else cfg.CLEAN_COHORT[0])
-        self.combo_profile.pack(fill=tk.X, padx=16, pady=(0, 12))
+        tk.Label(sidebar, text="SUBJECT / COHORT PROFILE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(16, 4))
+        self.combo_profile = ttk.Combobox(sidebar, values=self.worker.available_profiles, state="readonly", font=("Segoe UI", 10))
+        self.combo_profile.set(self.worker.current_profile)
+        self.combo_profile.pack(fill=tk.X, padx=16, pady=(0, 4))
         self.combo_profile.bind("<<ComboboxSelected>>", self._on_profile_change)
+        
+        lbl_prof_note = tk.Label(sidebar, text="• Universal: Works for anyone in lab\n• Or pick Harsha/Guru Raj for calibrated arm", font=("Segoe UI", 8), fg="#8d99ae", bg="#2b2d42", justify=tk.LEFT)
+        lbl_prof_note.pack(anchor=tk.W, padx=16, pady=(0, 12))
 
         # 2. Classifier Architecture
         tk.Label(sidebar, text="CLASSIFIER ENGINE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
@@ -307,15 +331,20 @@ class LiveInferenceApp:
         self.btn_calib.pack(fill=tk.X, padx=16, pady=(0, 8))
 
         self.lbl_calib_status = tk.Label(sidebar, text="Rest Threshold: 8.0 mV", font=("Segoe UI", 9), fg="#8d99ae", bg="#2b2d42")
-        self.lbl_calib_status.pack(anchor=tk.W, padx=16, pady=(0, 6))
+        self.lbl_calib_status.pack(anchor=tk.W, padx=16, pady=(0, 4))
 
-        self.slider_thresh = tk.Scale(sidebar, from_=2.0, to=30.0, resolution=0.5, orient=tk.HORIZONTAL, bg="#2b2d42", fg="#ffffff", highlightthickness=0, command=self._on_slider_change)
+        self.slider_thresh = tk.Scale(sidebar, from_=2.0, to=40.0, resolution=0.5, orient=tk.HORIZONTAL, bg="#2b2d42", fg="#ffffff", highlightthickness=0, command=self._on_slider_change)
         self.slider_thresh.set(8.0)
         self.slider_thresh.pack(fill=tk.X, padx=16, pady=(0, 16))
 
-        # 4. Mode Switch: Hardware vs Simulation
+        # 4. View Switch: Single Filtered vs Raw+Filtered
+        tk.Label(sidebar, text="OSCILLOSCOPE VIEW", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
+        self.btn_view = tk.Button(sidebar, text="👁️ Toggle Raw vs Filtered View", font=("Segoe UI", 9, "bold"), bg="#4a4e69", fg="#ffffff", activebackground="#22223b", relief=tk.FLAT, pady=5, command=self._toggle_view)
+        self.btn_view.pack(fill=tk.X, padx=16, pady=(0, 16))
+
+        # 5. Mode Switch: Hardware vs Simulation
         tk.Label(sidebar, text="OPERATION MODE", font=("Segoe UI", 10, "bold"), fg="#edf2f4", bg="#2b2d42").pack(anchor=tk.W, padx=16, pady=(8, 4))
-        self.btn_mode = tk.Button(sidebar, text="Switch to Simulation Mode" if NIDAQ_AVAILABLE else "Simulation Mode (DAQ Missing)", font=("Segoe UI", 9), bg="#4a4e69", fg="#ffffff", activebackground="#22223b", relief=tk.FLAT, pady=4, command=self._toggle_mode)
+        self.btn_mode = tk.Button(sidebar, text="Switch to Simulation Mode" if NIDAQ_AVAILABLE else "Simulation Mode (DAQ Missing)", font=("Segoe UI", 9), bg="#5c677d", fg="#ffffff", activebackground="#33415c", relief=tk.FLAT, pady=4, command=self._toggle_mode)
         self.btn_mode.pack(fill=tk.X, padx=16, pady=(0, 16))
 
         # Main Dashboard Display (Right)
@@ -323,21 +352,22 @@ class LiveInferenceApp:
         main_panel.pack(fill=tk.BOTH, expand=True, side=tk.RIGHT, padx=12, pady=12)
 
         # Big Gesture Banner
-        self.banner_frame = tk.Frame(main_panel, bg="#7f8c8d", height=90)
-        self.banner_frame.pack(fill=tk.X, side=tk.TOP, pady=(0, 10))
+        self.banner_frame = tk.Frame(main_panel, bg="#7f8c8d", height=85)
+        self.banner_frame.pack(fill=tk.X, side=tk.TOP, pady=(0, 8))
         self.banner_frame.pack_propagate(False)
 
         self.lbl_gesture = tk.Label(self.banner_frame, text="REST / IDLE", font=("Segoe UI", 28, "bold"), fg="#ffffff", bg="#7f8c8d")
         self.lbl_gesture.pack(expand=True)
 
-        self.lbl_metrics = tk.Label(main_panel, text="RMS: 0.0 mV | Gate: REST | Confidence: 100%", font=("Segoe UI", 11, "bold"), fg="#8d99ae", bg="#1e1e24")
-        self.lbl_metrics.pack(anchor=tk.W, pady=(0, 8))
+        # Live Signal Diagnostics Header
+        self.lbl_metrics = tk.Label(main_panel, text="Raw: 0.0 mV | Filtered: 0.0 mV | Gate: REST | Conf: 100%", font=("Segoe UI", 10, "bold"), fg="#00f5d4", bg="#1e1e24")
+        self.lbl_metrics.pack(anchor=tk.W, pady=(0, 6))
 
         # Plots: Oscilloscope + Probabilities
         self.fig = Figure(figsize=(7, 5), dpi=100, facecolor="#1e1e24")
         self.ax_wave = self.fig.add_subplot(211)
         self.ax_bar = self.fig.add_subplot(212)
-        self.fig.tight_layout(pad=2.5)
+        self.fig.tight_layout(pad=2.2)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=main_panel)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -349,12 +379,17 @@ class LiveInferenceApp:
         self.ax_wave.set_facecolor("#121217")
         self.ax_wave.tick_params(colors="#8d99ae")
         self.ax_wave.grid(True, linestyle=":", alpha=0.3, color="#8d99ae")
-        self.ax_wave.set_ylabel("Filtered (mV)", fontdict={"weight": "bold", "color": "#edf2f4", "size": 9})
-        self.ax_wave.set_ylim(-50, 50)
+        self.ax_wave.set_ylabel("Signal (mV)", fontdict={"weight": "bold", "color": "#edf2f4", "size": 9})
+        self.ax_wave.set_ylim(-35, 35)
         self.ax_wave.set_xlim(0, 500)
         t_ms = np.linspace(0, 500, WINDOW_SIZE)
-        self.line_wave, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#00f5d4", lw=1.2)
-        self.line_gate = self.ax_wave.axhline(8.0, color="#e63946", linestyle="--", lw=1.0, label="Rest Gate")
+        
+        # Two traces: Raw (red/orange, faint) and Filtered (cyan, bright)
+        self.line_raw, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#e63946", lw=0.9, alpha=0.4, label="Raw Stream (50Hz Hum)")
+        self.line_clean, = self.ax_wave.plot(t_ms, np.zeros(WINDOW_SIZE), color="#00f5d4", lw=1.3, label="Clean Filtered sEMG")
+        self.line_gate = self.ax_wave.axhline(8.0, color="#f1faee", linestyle="--", lw=1.0, label="Rest Gate Threshold")
+        self.line_raw.set_visible(self.show_dual_view)
+        
         self.ax_wave.legend(loc="upper right", facecolor="#1e1e24", edgecolor="none", labelcolor="#edf2f4", fontsize=8)
 
         # Bar Chart
@@ -389,6 +424,13 @@ class LiveInferenceApp:
             self.worker.current_model_type = "lda"
         print(f"[UI] Switched model to: {self.worker.current_model_type}")
 
+    def _toggle_view(self):
+        self.show_dual_view = not self.show_dual_view
+        self.line_raw.set_visible(self.show_dual_view)
+        mode_str = "Showing Raw + Filtered Overlay" if self.show_dual_view else "Showing Clean Filtered View Only"
+        self.btn_view.config(text=f"👁️ View: {'Raw+Clean' if self.show_dual_view else 'Clean Only'}")
+        print(f"[UI] {mode_str}")
+
     def _toggle_mode(self):
         new_mode = not self.worker.simulated_mode
         self.worker.stop()
@@ -412,8 +454,11 @@ class LiveInferenceApp:
         # 2. Process Live Data Frames
         if not self.data_queue.empty():
             frame = self.data_queue.get_nowait()
+            raw_wave = frame["raw_waveform"]
             clean_wave = frame["clean_waveform"]
-            rms_mv = frame["rms_mv"]
+            raw_rms = frame["raw_rms_mv"]
+            clean_rms = frame["rms_mv"]
+            hum_red = frame["hum_reduction"]
             thresh_mv = frame["threshold_mv"]
             gesture = frame["gesture"]
             conf = frame["confidence"]
@@ -424,13 +469,20 @@ class LiveInferenceApp:
             self.banner_frame.config(bg=bg_color)
             self.lbl_gesture.config(text=gesture.upper(), bg=bg_color)
             
-            gate_status = "REST / IDLE" if gesture == "REST" else "ACTIVE FLEXION"
-            self.lbl_metrics.config(text=f"RMS: {rms_mv:5.1f} mV | Gate: {gate_status} (Threshold: {thresh_mv:.1f} mV) | Conf: {conf*100:4.1f}%")
+            gate_status = "REST / IDLE" if gesture == "REST" else "ACTIVE CONTRACTION"
+            self.lbl_metrics.config(
+                text=f"Raw RMS: {raw_rms:5.1f} mV | Clean RMS: {clean_rms:4.1f} mV ({hum_red:4.1f}% Hum Scrubbed) | Gate: {gate_status} (Thresh: {thresh_mv:.1f} mV) | Conf: {conf*100:4.1f}%"
+            )
 
             # Update Waveform Plot
-            self.line_wave.set_ydata(clean_wave)
-            max_abs = max(20.0, np.max(np.abs(clean_wave)) * 1.25)
-            self.ax_wave.set_ylim(-max_abs, max_abs)
+            self.line_clean.set_ydata(clean_wave)
+            if self.show_dual_view:
+                self.line_raw.set_ydata(raw_wave)
+                y_max = max(50.0, np.max(np.abs(raw_wave)) * 1.1)
+            else:
+                y_max = max(25.0, np.max(np.abs(clean_wave)) * 1.3)
+                
+            self.ax_wave.set_ylim(-y_max, y_max)
             self.line_gate.set_ydata([thresh_mv, thresh_mv])
 
             # Update Bar Chart
